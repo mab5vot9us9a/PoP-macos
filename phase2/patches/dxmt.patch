@@ -1,0 +1,323 @@
+diff --git a/meson.options b/meson.options
+index 3424385..5c593e4 100644
+--- a/meson.options
++++ b/meson.options
+@@ -19,3 +19,14 @@ option('enable_nvngx', type : 'boolean', value : false)
+ # meson.build). Raise it only when the shaders need a newer standard: a device
+ # refuses a library written for a version its OS does not know.
+ option('metal_std', type : 'string', value : 'metal3.1')
++# MADEIRA (macOS x86_64 Wine build): compile the madeira-d3d12 shader-converter
++# service (madeira_ir_unix.mm and its two helpers) into winemetal.so, so a
++# stock x86_64 macOS Wine can run the D3D12 runtime. On iOS the same objects
++# are produced by build/dxmt-ios/build.sh into the app's static library; the
++# option exists so that the macOS .so is built by meson like upstream DXMT's.
++# Value: path to the madeira-d3d12 directory ('' = not built).
++option('madeira_d3d12_path', type : 'string', value : '')
++# Include directory holding metal_irconverter/ (the vendored converter headers).
++option('madeira_msc_include', type : 'string', value : '')
++# Identity of the converter build for the DXIL cache key (see build/dxmt-ios/build.sh).
++option('madeira_converter_id', type : 'string', value : 'macos-dev')
+diff --git a/src/airconv/shaders/air_tessellation.metal b/src/airconv/shaders/air_tessellation.metal
+index 56ba86e..6c65ac4 100644
+--- a/src/airconv/shaders/air_tessellation.metal
++++ b/src/airconv/shaders/air_tessellation.metal
+@@ -150,7 +150,7 @@ struct TessMeshWorkload {
+ 
+ int
+ get_next_index(threadgroup int *out_count) {
+-  return __metal_atomic_fetch_add_explicit(out_count, 1, int(memory_order_relaxed), __METAL_MEMORY_SCOPE_THREADGROUP__);
++  return atomic_fetch_add_explicit(reinterpret_cast<threadgroup atomic_int *>(out_count), 1, memory_order_relaxed);   /* as upstream 3Shain/dxmt: the __metal_ intrinsic changed arity in the Xcode 27 Metal toolchain */
+ }
+ 
+ template <partitioning partition>
+diff --git a/src/winemetal/unix/meson.build b/src/winemetal/unix/meson.build
+index 694fa31..aff2241 100644
+--- a/src/winemetal/unix/meson.build
++++ b/src/winemetal/unix/meson.build
+@@ -1,6 +1,9 @@
+ winemetal_unix_src = [
+   'winemetal_unix.c',
+   'cache.c',
++  # MADEIRA: no-op definitions of the hooks the iOS app provides (macOS build only;
++  # this meson target is never built for iOS, see build/dxmt-ios/build.sh).
++  'wmt_macos_stubs.c',
+ ]
+ 
+ if wine_build_path != ''
+@@ -25,10 +28,70 @@ winemetal_unix_ld_args = [
+ ]
+ winemetal_unix_link_depends = []
+ 
++# MADEIRA (macOS x86_64 Wine build, see meson.options madeira_d3d12_path): the
++# shader-converter service and its two helpers, compiled into winemetal.so the
++# way build/dxmt-ios/build.sh compiles them into the iOS static library. The
++# three objects are built as a separate static library because each needs its
++# own language and flags (Objective-C++ with ARC; C++ without exceptions; C++
++# with LLVM's bitcode reader), and winemetal.so above is a plain C target.
++madeira_d3d12_path = get_option('madeira_d3d12_path')
++if madeira_d3d12_path != ''
++  add_languages('objcpp', native: true, required: true)
++  madeira_msc_include = get_option('madeira_msc_include')
++  if madeira_msc_include == ''
++    error('-Dmadeira_msc_include is required with -Dmadeira_d3d12_path')
++  endif
++  if not madeira_d3d12_path.startswith('/')
++    madeira_d3d12_path = join_paths(meson.project_source_root(), madeira_d3d12_path)
++  endif
++  madeira_unix = join_paths(madeira_d3d12_path, 'src/unix')
++  madeira_inc = include_directories(
++    join_paths(madeira_d3d12_path, 'src'),
++    madeira_msc_include,
++    '../../airconv',
++    '../../../include/native/directx',
++    '../../../include/native/windows',
++  )
++  madeira_common_args = [
++    '-DMADEIRA_IR_CONVERTER_ID="' + get_option('madeira_converter_id') + '"',
++    '-D_FILE_OFFSET_BITS=64', '-D__STDC_CONSTANT_MACROS',
++    '-D__STDC_FORMAT_MACROS', '-D__STDC_LIMIT_MACROS',
++    '-Wno-extern-c-compat', '-Wno-unused-parameter',
++    '-Wno-missing-field-initializers', '-Wno-missing-braces',
++    '-Wno-unused-const-variable',
++  ]
++  madeira_ir_lib = static_library('madeira_ir_unix',
++    [join_paths(madeira_unix, 'madeira_ir_unix.mm')],
++    include_directories : [ dxmt_include_path, madeira_inc ],
++    objcpp_args         : [ madeira_common_args, '-arch', 'x86_64', '-std=c++20', '-fobjc-arc' ],
++    native              : true,
++  )
++  madeira_helpers_lib = static_library('madeira_helpers_unix',
++    [join_paths(madeira_unix, 'madeira_sm5_ia.cpp'),
++     join_paths(madeira_unix, 'madeira_ags.cpp')],
++    include_directories : [ dxmt_include_path, madeira_inc, llvm_include_path_darwin ],
++    cpp_args            : [ madeira_common_args, '-fno-exceptions', '-fno-rtti' ],
++    native              : true,
++  )
++  # The converter runtime header (metal_irconverter_runtime.h) emits its helper
++  # bodies only in the one translation unit that defines IR_PRIVATE_IMPLEMENTATION;
++  # on iOS that is the M1 canary. Nothing in winemetal.so needs them, so no
++  # canary is linked here.
++  madeira_unix_dep = declare_dependency(
++    link_whole : [ madeira_ir_lib, madeira_helpers_lib ],
++  )
++  # Linking an Objective-C++ archive makes meson link winemetal.so with the
++  # Objective-C++ driver, which meson.build gives no -arch x86_64 link flag.
++  winemetal_unix_ld_args += ['-arch', 'x86_64']
++else
++  madeira_unix_dep = declare_dependency()
++endif
++
+ shared_library('winemetal', winemetal_unix_src,
+   name_prefix         : '',
+-  dependencies        : [ airconv_dep_darwin ],
+-  include_directories : dxmt_include_path,
++  dependencies        : [ airconv_dep_darwin , madeira_unix_dep ],
++  # '..' : wmt_remote_pack.h (Madeira's remote-Metal transport) includes winemetal.h by name
++  include_directories : [ dxmt_include_path, include_directories('..') ],
+   c_args              : ['-ObjC'],
+   link_args           : winemetal_unix_ld_args,
+   native              : true,
+diff --git a/src/winemetal/unix/winemetal_unix.c b/src/winemetal/unix/winemetal_unix.c
+index db46cda..a6b03b4 100644
+--- a/src/winemetal/unix/winemetal_unix.c
++++ b/src/winemetal/unix/winemetal_unix.c
+@@ -1,6 +1,13 @@
+ #include <stdatomic.h>
+ #include "../../../../build/madeira_cfg.h"   /* ml1095: one config file */
+ #include <sys/mman.h>
++/* MADEIRA (macOS port diagnostics): WMT_TRACE_RENDER=1 prints every render
++ * pass, viewport, scissor, pipeline bind and draw to stderr. */
++static int wmt_trace_render(void) {
++  static int on = -1;
++  if (on < 0) { const char *e = getenv("WMT_TRACE_RENDER"); on = (e && *e && *e != '0') ? 1 : 0; }
++  return on;
++}
+ #include <mach/vm_statistics.h>
+ #include <errno.h>
+ #include <fcntl.h>
+@@ -321,6 +328,13 @@ _MTLCopyAllDevices(void *obj) {
+ #include <os/proc.h>
+ #include <mach/mach.h>
+ #include <sys/sysctl.h>
++#if !TARGET_OS_IOS
++/* MADEIRA (macOS x86_64 Wine build): os_proc_available_memory() is iOS-only.
++ * macOS has no per-process memory limit of that kind; 0 is the value the
++ * budget code below already treats as "limit unknown". */
++static inline size_t madeira_macos_proc_available_memory(void) { return 0; }
++#define os_proc_available_memory() madeira_macos_proc_available_memory()
++#endif
+ /* The process limit above can be larger than the device's RAM: an iPad with
+  * 7644 MB of RAM measured 8192 MB, so nothing here ever saw a shortage and God
+  * of War sat at an 8175 MB footprint with 4.4 GB compressed, drawing black
+@@ -414,6 +428,19 @@ static uint64_t madeira_ml1075_dynamic_budget(uint64_t base) {
+ }
+ static uint64_t madeira_ml1042_video_budget(uint64_t metal_recommended) {
+   static uint64_t cached;
++#if !TARGET_OS_IOS
++  /* macOS: there is no jetsam line to budget against and the process limit is
++   * unknown here (the iOS-only query answers 0, which made the formula above
++   * report 1024 MB on a 32 GB machine). Metal's recommended working set is the
++   * budget, as upstream DXMT reports it; madeira.cfg vram-mb still overrides. */
++  if (!cached) {
++    long long mb = madeira_cfg_int("vram-mb", 0);
++    cached = mb >= 256 ? (uint64_t)mb << 20 : metal_recommended;
++    fprintf(stderr, "[wmt] ml1042 video memory budget = %llu MB (macOS: Metal recommends %llu MB; madeira.cfg vram-mb overrides)\n",
++            (unsigned long long)(cached >> 20), (unsigned long long)(metal_recommended >> 20));
++  }
++  return cached;
++#endif
+   if (cached) return madeira_ml1075_dynamic_budget(cached);
+ 
+   uint64_t budget = 0;
+@@ -1497,6 +1524,21 @@ _MTLCommandBuffer_renderCommandEncoder(void *obj) {
+   descriptor.visibilityResultBuffer = (id<MTLBuffer>)info->visibility_buffer;
+ 
+   params->ret = (obj_handle_t)[(id<MTLCommandBuffer>)params->handle renderCommandEncoderWithDescriptor:descriptor];
++  if (wmt_trace_render()) {
++    fprintf(stderr, "[wmt-trace] render pass enc=%p cb=%p w=%u h=%u samples=%u\n", (void *)params->ret, (void *)params->handle,
++            (unsigned)info->render_target_width, (unsigned)info->render_target_height, (unsigned)info->default_raster_sample_count);
++    for (unsigned i = 0; i < 8; i++) if (info->colors[i].texture) {
++      id<MTLTexture> t = (id<MTLTexture>)info->colors[i].texture;
++      fprintf(stderr, "[wmt-trace]   color[%u] tex=%p %lux%lu fmt=%lu usage=%lx load=%u store=%u clear=(%g,%g,%g,%g) level=%u slice=%u\n", i, (void *)t,
++              (unsigned long)t.width, (unsigned long)t.height, (unsigned long)t.pixelFormat, (unsigned long)t.usage,
++              (unsigned)info->colors[i].load_action, (unsigned)info->colors[i].store_action,
++              info->colors[i].clear_color.r, info->colors[i].clear_color.g, info->colors[i].clear_color.b, info->colors[i].clear_color.a,
++              (unsigned)info->colors[i].level, (unsigned)info->colors[i].slice);
++    }
++    if (info->depth.texture) { id<MTLTexture> t = (id<MTLTexture>)info->depth.texture;
++      fprintf(stderr, "[wmt-trace]   depth tex=%p fmt=%lu load=%u store=%u clear=%g\n", (void *)t, (unsigned long)t.pixelFormat,
++              (unsigned)info->depth.load_action, (unsigned)info->depth.store_action, info->depth.clear_depth); }
++  }
+ 
+   /* Count realized native passes, including clears and the final present.
+    * No new PE ABI or emulated hot-path counters are needed. */
+@@ -1639,6 +1681,18 @@ _MTLDevice_newRenderPipelineState(void *obj) {
+   NSError *err = NULL;
+   MTLPipelineOption options =
+       info->fail_on_binary_archive_miss ? MTLPipelineOptionFailOnBinaryArchiveMiss : MTLPipelineOptionNone;
++  if (wmt_trace_render()) {
++    fprintf(stderr, "[wmt-trace] new PSO vs=%s fs=%s raster=%d samples=%lu depthfmt=%lu stencilfmt=%lu topo=%lu a2c=%d color0: fmt=%lu mask=%lx blend=%d\n",
++            [descriptor.vertexFunction.name UTF8String] ?: "(null)", [descriptor.fragmentFunction.name UTF8String] ?: "(null)",
++            (int)descriptor.rasterizationEnabled, (unsigned long)descriptor.rasterSampleCount, (unsigned long)descriptor.depthAttachmentPixelFormat,
++            (unsigned long)descriptor.stencilAttachmentPixelFormat, (unsigned long)descriptor.inputPrimitiveTopology, (int)descriptor.alphaToCoverageEnabled,
++            (unsigned long)descriptor.colorAttachments[0].pixelFormat, (unsigned long)descriptor.colorAttachments[0].writeMask, (int)descriptor.colorAttachments[0].blendingEnabled);
++    if (descriptor.vertexDescriptor) for (unsigned k = 0; k < 31; k++) if (descriptor.vertexDescriptor.attributes[k].format)
++      fprintf(stderr, "[wmt-trace]   vd attr[%u] fmt=%lu off=%lu buf=%lu stride=%lu step=%lu\n", k, (unsigned long)descriptor.vertexDescriptor.attributes[k].format,
++              (unsigned long)descriptor.vertexDescriptor.attributes[k].offset, (unsigned long)descriptor.vertexDescriptor.attributes[k].bufferIndex,
++              (unsigned long)descriptor.vertexDescriptor.layouts[descriptor.vertexDescriptor.attributes[k].bufferIndex].stride,
++              (unsigned long)descriptor.vertexDescriptor.layouts[descriptor.vertexDescriptor.attributes[k].bufferIndex].stepFunction);
++  }
+   params->ret_pso = (obj_handle_t)[(id<MTLDevice>)params->device newRenderPipelineStateWithDescriptor:descriptor
+                                                                                               options:options
+                                                                                            reflection:nil
+@@ -1738,6 +1792,18 @@ _MTLDevice_newRenderPipelineStateVD(void *obj) {
+   NSError *err = NULL;
+   MTLPipelineOption options =
+       info->fail_on_binary_archive_miss ? MTLPipelineOptionFailOnBinaryArchiveMiss : MTLPipelineOptionNone;
++  if (wmt_trace_render()) {
++    fprintf(stderr, "[wmt-trace] new PSO vs=%s fs=%s raster=%d samples=%lu depthfmt=%lu stencilfmt=%lu topo=%lu a2c=%d color0: fmt=%lu mask=%lx blend=%d\n",
++            [descriptor.vertexFunction.name UTF8String] ?: "(null)", [descriptor.fragmentFunction.name UTF8String] ?: "(null)",
++            (int)descriptor.rasterizationEnabled, (unsigned long)descriptor.rasterSampleCount, (unsigned long)descriptor.depthAttachmentPixelFormat,
++            (unsigned long)descriptor.stencilAttachmentPixelFormat, (unsigned long)descriptor.inputPrimitiveTopology, (int)descriptor.alphaToCoverageEnabled,
++            (unsigned long)descriptor.colorAttachments[0].pixelFormat, (unsigned long)descriptor.colorAttachments[0].writeMask, (int)descriptor.colorAttachments[0].blendingEnabled);
++    if (descriptor.vertexDescriptor) for (unsigned k = 0; k < 31; k++) if (descriptor.vertexDescriptor.attributes[k].format)
++      fprintf(stderr, "[wmt-trace]   vd attr[%u] fmt=%lu off=%lu buf=%lu stride=%lu step=%lu\n", k, (unsigned long)descriptor.vertexDescriptor.attributes[k].format,
++              (unsigned long)descriptor.vertexDescriptor.attributes[k].offset, (unsigned long)descriptor.vertexDescriptor.attributes[k].bufferIndex,
++              (unsigned long)descriptor.vertexDescriptor.layouts[descriptor.vertexDescriptor.attributes[k].bufferIndex].stride,
++              (unsigned long)descriptor.vertexDescriptor.layouts[descriptor.vertexDescriptor.attributes[k].bufferIndex].stepFunction);
++  }
+   params->ret_pso = (obj_handle_t)[(id<MTLDevice>)params->device newRenderPipelineStateWithDescriptor:descriptor
+                                                                                               options:options
+                                                                                            reflection:nil
+@@ -2526,6 +2592,7 @@ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
+     }
+     case WMTRenderCommandSetRasterizerState: {
+       struct wmtcmd_render_setrasterizerstate *body = (struct wmtcmd_render_setrasterizerstate *)next;
++      if (wmt_trace_render()) fprintf(stderr, "[wmt-trace] enc=%p raster fill=%u cull=%u clip=%u winding=%u bias=%g slope=%g clamp=%g\n", (void *)encoder, (unsigned)body->fill_mode, (unsigned)body->cull_mode, (unsigned)body->depth_clip_mode, (unsigned)body->winding, body->depth_bias, body->scole_scale, body->depth_bias_clamp);
+       [encoder setTriangleFillMode:(MTLTriangleFillMode)body->fill_mode];
+       [encoder setCullMode:(MTLCullMode)body->cull_mode];
+       [encoder setDepthClipMode:(MTLDepthClipMode)body->depth_clip_mode];
+@@ -2536,22 +2603,28 @@ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
+     case WMTRenderCommandSetViewports: {
+       struct wmtcmd_render_setviewports *body = (struct wmtcmd_render_setviewports *)next;
+       wmt_census_viewports(body->viewport_count);
++      if (wmt_trace_render()) { const MTLViewport *v = (const MTLViewport *)body->viewports.ptr; for (unsigned k = 0; k < body->viewport_count; k++)
++        fprintf(stderr, "[wmt-trace] enc=%p viewports[%u] x=%g y=%g w=%g h=%g zn=%g zf=%g\n", (void *)encoder, k, v[k].originX, v[k].originY, v[k].width, v[k].height, v[k].znear, v[k].zfar); }
+       [encoder setViewports:(const MTLViewport *)body->viewports.ptr count:body->viewport_count];
+       break;
+     }
+     case WMTRenderCommandSetScissorRects: {
+       struct wmtcmd_render_setscissorrects *body = (struct wmtcmd_render_setscissorrects *)next;
+       wmt_census_scissors(body->rect_count);
++      if (wmt_trace_render()) { const MTLScissorRect *r = (const MTLScissorRect *)body->scissor_rects.ptr; for (unsigned k = 0; k < body->rect_count; k++)
++        fprintf(stderr, "[wmt-trace] enc=%p scissors[%u] x=%lu y=%lu w=%lu h=%lu\n", (void *)encoder, k, (unsigned long)r[k].x, (unsigned long)r[k].y, (unsigned long)r[k].width, (unsigned long)r[k].height); }
+       [encoder setScissorRects:(const MTLScissorRect *)body->scissor_rects.ptr count:body->rect_count];
+       break;
+     }
+     case WMTRenderCommandSetPSO: {
+       struct wmtcmd_render_setpso *body = (struct wmtcmd_render_setpso *)next;
++      if (wmt_trace_render()) fprintf(stderr, "[wmt-trace] enc=%p pso=%p %s\n", (void *)encoder, (void *)body->pso, [[((id<MTLRenderPipelineState>)body->pso) label] UTF8String] ?: "");
+       [encoder setRenderPipelineState:(id<MTLRenderPipelineState>)body->pso];
+       break;
+     }
+     case WMTRenderCommandSetDSSO: {
+       struct wmtcmd_render_setdsso *body = (struct wmtcmd_render_setdsso *)next;
++      if (wmt_trace_render()) fprintf(stderr, "[wmt-trace] enc=%p dsso=%p ref=%u\n", (void *)encoder, (void *)body->dsso, (unsigned)body->stencil_ref);
+       [encoder setDepthStencilState:(id<MTLDepthStencilState>)body->dsso];
+       [encoder setStencilReferenceValue:body->stencil_ref];
+       break;
+@@ -2570,6 +2643,7 @@ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
+     case WMTRenderCommandDraw: {
+       struct wmtcmd_render_draw *body = (struct wmtcmd_render_draw *)next;
+       atomic_fetch_add_explicit(&g_madeira_draw_calls, 1, memory_order_relaxed);
++      if (wmt_trace_render()) fprintf(stderr, "[wmt-trace] enc=%p draw prim=%u start=%llu count=%llu inst=%llu\n", (void *)encoder, (unsigned)body->primitive_type, (unsigned long long)body->vertex_start, (unsigned long long)body->vertex_count, (unsigned long long)body->instance_count);
+       [encoder drawPrimitives:(MTLPrimitiveType)body->primitive_type
+                   vertexStart:body->vertex_start
+                   vertexCount:body->vertex_count
+@@ -2636,6 +2710,9 @@ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
+     case WMTRenderCommandDrawMeshThreadgroupsIndirect: {
+       struct wmtcmd_render_draw_meshthreadgroups_indirect *body =
+           (struct wmtcmd_render_draw_meshthreadgroups_indirect *)next;
++      /* Same object threadgroup memory marker as the direct variant above. */
++      if (body->reserved[1] == 0x7e55 && body->reserved[0])
++        [encoder setObjectThreadgroupMemoryLength:body->reserved[0] atIndex:0];
+       [encoder drawMeshThreadgroupsWithIndirectBuffer:(id<MTLBuffer>)body->indirect_args_buffer
+                                  indirectBufferOffset:body->indirect_args_offset
+                           threadsPerObjectThreadgroup:MTLSizeMake(
+@@ -2760,6 +2837,7 @@ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
+         struct WMTViewport src;
+         MTLViewport dst;
+       } u = {.src = body->viewport};
++      if (wmt_trace_render()) fprintf(stderr, "[wmt-trace] enc=%p viewport x=%g y=%g w=%g h=%g zn=%g zf=%g\n", (void *)encoder, u.dst.originX, u.dst.originY, u.dst.width, u.dst.height, u.dst.znear, u.dst.zfar);
+       [encoder setViewport:u.dst];
+       break;
+     }
+@@ -2769,6 +2847,7 @@ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
+         struct WMTScissorRect src;
+         MTLScissorRect dst;
+       } u = {.src = body->scissor_rect};
++      if (wmt_trace_render()) fprintf(stderr, "[wmt-trace] enc=%p scissor x=%lu y=%lu w=%lu h=%lu\n", (void *)encoder, (unsigned long)u.dst.x, (unsigned long)u.dst.y, (unsigned long)u.dst.width, (unsigned long)u.dst.height);
+       [encoder setScissorRect:u.dst];
+       break;
+     }
+@@ -6405,6 +6484,20 @@ static NTSTATUS _madeira_ctl(void *args) {
+   case 0: {
+     int n;
+     do { n = g_madeira_capture_req; } while (n && !__sync_bool_compare_and_swap(&g_madeira_capture_req, n, 0));
++    /* No UI on macOS: a file <MADEIRA_DOCS_DIR>/madeira-capture.txt holding a
++     * frame count requests a capture; it is consumed (unlinked) when read. */
++    {
++      const char *docs = getenv("MADEIRA_DOCS_DIR");
++      if (docs && *docs) {
++        char path[1400]; FILE *f;
++        snprintf(path, sizeof path, "%s/madeira-capture.txt", docs);
++        if ((f = fopen(path, "r"))) {
++          int k = 0; if (fscanf(f, "%d", &k) != 1 || k <= 0) k = 1;
++          fclose(f); unlink(path); n += k;
++          fprintf(stderr, "[capture] ml1098 %s requested %d frame(s)\n", path, k);
++        }
++      }
++    }
+     a->ret = (uint32_t)n;
+     break;
+   }

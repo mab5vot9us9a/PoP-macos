@@ -1,0 +1,28 @@
+# Pioneers of Pagonia on macOS via Madeira: findings repo. Only documents, scripts, patches
+# and screenshots are tracked. Everything below is either game content (copyrighted, must not
+# be redistributed), Apple binaries (D3DMetal / Metal Shader Converter output, licence-bound),
+# or bulky runtime output that the documents summarise.
+
+# Phase 0: shader blobs carved from the game, converter output, Apple D3DMetal libraries, compiled harnesses
+phase0/shaders/
+phase0/out/
+phase0/d3dmetal_lib/
+phase0/tess_pipeline
+phase0/tess_pipeline_x86_d3dm
+phase0/load_metallib
+
+# Phase 2: runtime output of the Madeira layer
+phase2/logs/
+phase2/capture/
+phase2/shadercache/
+phase2/shadercache.bak/
+phase2/madeira-libs/
+phase2/madeira-capture.txt
+phase2/.scratch
+
+# Screenshots are not published
+*.png
+
+# macOS / editor noise
+.DS_Store
+*.swp

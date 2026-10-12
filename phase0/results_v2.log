@@ -1,0 +1,74 @@
+OK   vs=0x12a52490_vs6_0 hs=0x12aa2180_hs6_0 ds=0x12a4e918_ds6_0 ps=0x12a3bb30_ps6_0
+OK   vs=0x12a52490_vs6_0 hs=0x12aa2180_hs6_0 ds=0x12a4e918_ds6_0 ps=0x12c6e1c8_ps6_0
+OK   vs=0x12a510b8_vs6_0 hs=0x12c42160_hs6_0 ds=0x12becd88_ds6_0 ps=0xde0d962_ps6_0
+OK   vs=0x12a510b8_vs6_0 hs=0x12c42160_hs6_0 ds=0x12becd88_ds6_0 ps=0xde12386_ps6_0
+OK   vs=0x12c5ddc0_vs6_0 hs=0x12c42160_hs6_0 ds=0x12becd88_ds6_0 ps=0xde0d962_ps6_0
+OK   vs=0x12c5ddc0_vs6_0 hs=0x12c42160_hs6_0 ds=0x12becd88_ds6_0 ps=0xde12386_ps6_0
+OK   vs=0x12c7b5f0_vs6_0 hs=0x12c42160_hs6_0 ds=0x12becd88_ds6_0 ps=0xde0d962_ps6_0
+OK   vs=0x12c7b5f0_vs6_0 hs=0x12c42160_hs6_0 ds=0x12becd88_ds6_0 ps=0xde12386_ps6_0
+OK   vs=0x12a510b8_vs6_0 hs=0x12c4a248_hs6_0 ds=0x12a5a530_ds6_0 ps=0x114a8f7e_ps6_0
+OK   vs=0x12a510b8_vs6_0 hs=0x12c4a248_hs6_0 ds=0x12a5a530_ds6_0 ps=0x12a5fa38_ps6_0
+SKIP no PS for Pioneers of Pagonia.exe_0x12c4a248_hs6_0.dxbc/Pioneers of Pagonia.exe_0x12a606c0_ds6_0.dxbc
+OK   vs=0x12a510b8_vs6_0 hs=0x12c4a248_hs6_0 ds=0x12c5f138_ds6_0 ps=0x12aa8568_ps6_0
+OK   vs=0x12a510b8_vs6_0 hs=0x12c4a248_hs6_0 ds=0x12c5f138_ds6_0 ps=0x12bf3b80_ps6_0
+OK   vs=0x12c5ddc0_vs6_0 hs=0x12c4a248_hs6_0 ds=0x12a5a530_ds6_0 ps=0x114a8f7e_ps6_0
+OK   vs=0x12c5ddc0_vs6_0 hs=0x12c4a248_hs6_0 ds=0x12a5a530_ds6_0 ps=0x12a5fa38_ps6_0
+SKIP no PS for Pioneers of Pagonia.exe_0x12c4a248_hs6_0.dxbc/Pioneers of Pagonia.exe_0x12a606c0_ds6_0.dxbc
+OK   vs=0x12c5ddc0_vs6_0 hs=0x12c4a248_hs6_0 ds=0x12c5f138_ds6_0 ps=0x12aa8568_ps6_0
+OK   vs=0x12c5ddc0_vs6_0 hs=0x12c4a248_hs6_0 ds=0x12c5f138_ds6_0 ps=0x12bf3b80_ps6_0
+OK   vs=0x12c7b5f0_vs6_0 hs=0x12c4a248_hs6_0 ds=0x12a5a530_ds6_0 ps=0x114a8f7e_ps6_0
+OK   vs=0x12c7b5f0_vs6_0 hs=0x12c4a248_hs6_0 ds=0x12a5a530_ds6_0 ps=0x12a5fa38_ps6_0
+SKIP no PS for Pioneers of Pagonia.exe_0x12c4a248_hs6_0.dxbc/Pioneers of Pagonia.exe_0x12a606c0_ds6_0.dxbc
+OK   vs=0x12c7b5f0_vs6_0 hs=0x12c4a248_hs6_0 ds=0x12c5f138_ds6_0 ps=0x12aa8568_ps6_0
+OK   vs=0x12c7b5f0_vs6_0 hs=0x12c4a248_hs6_0 ds=0x12c5f138_ds6_0 ps=0x12bf3b80_ps6_0
+OK   vs=0x12c5d340_vs6_0 hs=0x12c4dcf8_hs6_0 ds=0x12a5a530_ds6_0 ps=0x114a8f7e_ps6_0
+OK   vs=0x12c5d340_vs6_0 hs=0x12c4dcf8_hs6_0 ds=0x12a5a530_ds6_0 ps=0x12a5fa38_ps6_0
+SKIP no PS for Pioneers of Pagonia.exe_0x12c4dcf8_hs6_0.dxbc/Pioneers of Pagonia.exe_0x12a606c0_ds6_0.dxbc
+OK   vs=0x12c5d340_vs6_0 hs=0x12c4dcf8_hs6_0 ds=0x12c5f138_ds6_0 ps=0x12aa8568_ps6_0
+OK   vs=0x12c5d340_vs6_0 hs=0x12c4dcf8_hs6_0 ds=0x12c5f138_ds6_0 ps=0x12bf3b80_ps6_0
+OK   vs=0x12c5d340_vs6_0 hs=0x12c596d0_hs6_0 ds=0x12aa4c98_ds6_0 ps=0x12aa8568_ps6_0
+OK   vs=0x12c5d340_vs6_0 hs=0x12c596d0_hs6_0 ds=0x12aa4c98_ds6_0 ps=0x12bf3b80_ps6_0
+OK   vs=0x12a510b8_vs6_0 hs=0x12c67d48_hs6_0 ds=0x12c47fb8_ds6_0 ps=0x12aa8568_ps6_0
+OK   vs=0x12a510b8_vs6_0 hs=0x12c67d48_hs6_0 ds=0x12c47fb8_ds6_0 ps=0x12bf3b80_ps6_0
+OK   vs=0x12a510b8_vs6_0 hs=0x12c67d48_hs6_0 ds=0x12c57868_ds6_0 ps=0x12bf3b80_ps6_0
+FAIL vs=0x12a510b8_vs6_0 hs=0x12c67d48_hs6_0 ds=0x12c57868_ds6_0 ps=0xde16ebe_ps6_0
+     FAIL convert PS: code=1 Unbounded arrays require specifying a root signature
+OK   vs=0x12c5ddc0_vs6_0 hs=0x12c67d48_hs6_0 ds=0x12c47fb8_ds6_0 ps=0x12aa8568_ps6_0
+OK   vs=0x12c5ddc0_vs6_0 hs=0x12c67d48_hs6_0 ds=0x12c47fb8_ds6_0 ps=0x12bf3b80_ps6_0
+OK   vs=0x12c5ddc0_vs6_0 hs=0x12c67d48_hs6_0 ds=0x12c57868_ds6_0 ps=0x12bf3b80_ps6_0
+FAIL vs=0x12c5ddc0_vs6_0 hs=0x12c67d48_hs6_0 ds=0x12c57868_ds6_0 ps=0xde16ebe_ps6_0
+     FAIL convert PS: code=1 Unbounded arrays require specifying a root signature
+OK   vs=0x12c7b5f0_vs6_0 hs=0x12c67d48_hs6_0 ds=0x12c47fb8_ds6_0 ps=0x12aa8568_ps6_0
+OK   vs=0x12c7b5f0_vs6_0 hs=0x12c67d48_hs6_0 ds=0x12c47fb8_ds6_0 ps=0x12bf3b80_ps6_0
+OK   vs=0x12c7b5f0_vs6_0 hs=0x12c67d48_hs6_0 ds=0x12c57868_ds6_0 ps=0x12bf3b80_ps6_0
+FAIL vs=0x12c7b5f0_vs6_0 hs=0x12c67d48_hs6_0 ds=0x12c57868_ds6_0 ps=0xde16ebe_ps6_0
+     FAIL convert PS: code=1 Unbounded arrays require specifying a root signature
+OK   vs=0x12aaa7e0_vs6_0 hs=0x12c79738_hs6_0 ds=0x12c47fb8_ds6_0 ps=0x12aa8568_ps6_0
+OK   vs=0x12aaa7e0_vs6_0 hs=0x12c79738_hs6_0 ds=0x12c47fb8_ds6_0 ps=0x12bf3b80_ps6_0
+OK   vs=0x12aaa7e0_vs6_0 hs=0x12c79738_hs6_0 ds=0x12c57868_ds6_0 ps=0x12bf3b80_ps6_0
+FAIL vs=0x12aaa7e0_vs6_0 hs=0x12c79738_hs6_0 ds=0x12c57868_ds6_0 ps=0xde16ebe_ps6_0
+     FAIL convert PS: code=1 Unbounded arrays require specifying a root signature
+OK   vs=0x12a510b8_vs6_0 hs=0xe03fe56_hs6_0 ds=0xe03a22e_ds6_0 ps=0x12bf3b80_ps6_0
+OK   vs=0x12a510b8_vs6_0 hs=0xe03fe56_hs6_0 ds=0xe03a22e_ds6_0 ps=0xdf65886_ps6_0
+OK   vs=0x12a510b8_vs6_0 hs=0xe03fe56_hs6_0 ds=0xe03cd36_ds6_0 ps=0x12bf3b80_ps6_0
+OK   vs=0x12a510b8_vs6_0 hs=0xe03fe56_hs6_0 ds=0xe03cd36_ds6_0 ps=0xdf65886_ps6_0
+OK   vs=0x12c5ddc0_vs6_0 hs=0xe03fe56_hs6_0 ds=0xe03a22e_ds6_0 ps=0x12bf3b80_ps6_0
+OK   vs=0x12c5ddc0_vs6_0 hs=0xe03fe56_hs6_0 ds=0xe03a22e_ds6_0 ps=0xdf65886_ps6_0
+OK   vs=0x12c5ddc0_vs6_0 hs=0xe03fe56_hs6_0 ds=0xe03cd36_ds6_0 ps=0x12bf3b80_ps6_0
+OK   vs=0x12c5ddc0_vs6_0 hs=0xe03fe56_hs6_0 ds=0xe03cd36_ds6_0 ps=0xdf65886_ps6_0
+OK   vs=0x12c7b5f0_vs6_0 hs=0xe03fe56_hs6_0 ds=0xe03a22e_ds6_0 ps=0x12bf3b80_ps6_0
+OK   vs=0x12c7b5f0_vs6_0 hs=0xe03fe56_hs6_0 ds=0xe03a22e_ds6_0 ps=0xdf65886_ps6_0
+OK   vs=0x12c7b5f0_vs6_0 hs=0xe03fe56_hs6_0 ds=0xe03cd36_ds6_0 ps=0x12bf3b80_ps6_0
+OK   vs=0x12c7b5f0_vs6_0 hs=0xe03fe56_hs6_0 ds=0xe03cd36_ds6_0 ps=0xdf65886_ps6_0
+OK   vs=0x12a510b8_vs6_0 hs=0xe042536_hs6_0 ds=0xe03a22e_ds6_0 ps=0x12bf3b80_ps6_0
+OK   vs=0x12a510b8_vs6_0 hs=0xe042536_hs6_0 ds=0xe03a22e_ds6_0 ps=0xdf65886_ps6_0
+OK   vs=0x12a510b8_vs6_0 hs=0xe042536_hs6_0 ds=0xe03cd36_ds6_0 ps=0x12bf3b80_ps6_0
+OK   vs=0x12a510b8_vs6_0 hs=0xe042536_hs6_0 ds=0xe03cd36_ds6_0 ps=0xdf65886_ps6_0
+OK   vs=0x12c5ddc0_vs6_0 hs=0xe042536_hs6_0 ds=0xe03a22e_ds6_0 ps=0x12bf3b80_ps6_0
+OK   vs=0x12c5ddc0_vs6_0 hs=0xe042536_hs6_0 ds=0xe03a22e_ds6_0 ps=0xdf65886_ps6_0
+OK   vs=0x12c5ddc0_vs6_0 hs=0xe042536_hs6_0 ds=0xe03cd36_ds6_0 ps=0x12bf3b80_ps6_0
+OK   vs=0x12c5ddc0_vs6_0 hs=0xe042536_hs6_0 ds=0xe03cd36_ds6_0 ps=0xdf65886_ps6_0
+OK   vs=0x12c7b5f0_vs6_0 hs=0xe042536_hs6_0 ds=0xe03a22e_ds6_0 ps=0x12bf3b80_ps6_0
+OK   vs=0x12c7b5f0_vs6_0 hs=0xe042536_hs6_0 ds=0xe03a22e_ds6_0 ps=0xdf65886_ps6_0
+OK   vs=0x12c7b5f0_vs6_0 hs=0xe042536_hs6_0 ds=0xe03cd36_ds6_0 ps=0x12bf3b80_ps6_0
+OK   vs=0x12c7b5f0_vs6_0 hs=0xe042536_hs6_0 ds=0xe03cd36_ds6_0 ps=0xdf65886_ps6_0

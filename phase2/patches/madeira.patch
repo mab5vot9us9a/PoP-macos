@@ -1,0 +1,1605 @@
+diff --git a/build/madeira-d3d12/build-macos-x86_64.sh b/build/madeira-d3d12/build-macos-x86_64.sh
+new file mode 100755
+index 0000000..9034786
+--- /dev/null
++++ b/build/madeira-d3d12/build-macos-x86_64.sh
+@@ -0,0 +1,65 @@
++#!/bin/bash
++# Build the madeira-d3d12 runtime for a stock x86_64 macOS Wine (no FEX, no
++# iOS): winemetal.dll + winemetal.so from the dxmt submodule, then d3d12.dll,
++# madeira_d3d12.dll, d3d12core.dll and the x86_64 test executables.
++#
++# Inputs (see docs/MACOS_X86_64.md):
++#   toolchains/llvm-mingw-20260421-ucrt-macos-universal   llvm-mingw (PE side)
++#   toolchains/llvm-darwin                                 LLVM 15 x86_64 static libs (airconv)
++#   toolchains/wine                                        a Wine SDK with bin/winebuild,
++#                                                          lib/wine/x86_64-windows/lib{winecrt0,ntdll,dbghelp}.a,
++#                                                          lib/wine/x86_64-unix/{ntdll,winemac}.so
++#   research/GPTK/Metal Shader Converter 4.0 beta 2.pkg    (deps.sh verifies it)
++#
++# Output: build/madeira-d3d12/out-macos/ with everything to copy into a Wine
++# tree plus install.sh notes.
++set -eu
++DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++REPO_ROOT="$(cd "$DIR/../.." && pwd)"
++DXMT="$REPO_ROOT/dxmt"
++BUILD="$DXMT/build-x86_64"
++OUT="${OUT:-$DIR/out-macos}"
++
++source "$DIR/deps.sh"
++[[ "$MSC_HAVE_PKG" == 1 ]] || { echo "build-macos: the converter package is required (macOS dylib)" >&2; exit 1; }
++
++# Converter identity for the DXIL cache key: the same inputs as build/dxmt-ios/build.sh,
++# with the macOS dylib in place of the iOS one.
++converter_id_inputs() {
++    local f x
++    for f in "$REPO_ROOT/madeira-d3d12/src/unix" "$REPO_ROOT/madeira-d3d12/src/madeira_ir_abi.h" \
++             "$DIR/build-macos-x86_64.sh" "$DXMT/src/airconv" "$DXMT/libs" \
++             "$REPO_ROOT/toolchains/llvm-darwin/include/llvm/Config/llvm-config.h" "$MSC_INCLUDE" "$MSC_LIB_MACOS"; do
++        [ -e "$f" ] || { echo "absent ${f#"$REPO_ROOT"/}"; continue; }
++        find "$f" -type f | LC_ALL=C sort | while read -r x; do
++            echo "$(shasum -a 256 < "$x" | cut -c1-64) ${x#"$REPO_ROOT"/}"
++        done
++    done
++}
++CONVERTER_ID=$(converter_id_inputs | shasum -a 256 | cut -c1-16)
++echo "=== shader cache converter identity $CONVERTER_ID"
++
++if [[ ! -f "$BUILD/build.ninja" ]]; then
++    echo "=== meson setup $BUILD ==="
++    meson setup "$BUILD" "$DXMT" \
++        --cross-file "$DXMT/build-x86_64-win.txt" --native-file "$DXMT/build-osx.txt" \
++        -Dbuildtype=release \
++        -Dwine_install_path="$REPO_ROOT/toolchains/wine" \
++        -Dnative_llvm_path="$REPO_ROOT/toolchains/llvm-darwin" \
++        -Dmadeira_d3d12_path="$REPO_ROOT/madeira-d3d12" \
++        -Dmadeira_msc_include="$MSC_INCLUDE" \
++        -Dmadeira_converter_id="$CONVERTER_ID"
++fi
++
++echo "=== winemetal.dll + winemetal.so (x86_64) ==="
++ninja -C "$BUILD" src/winemetal/winemetal.dll src/winemetal/winemetal.dll.postproc src/winemetal/unix/winemetal.so src/dxgi/dxgi.dll
++
++echo "=== D3D12 PE side (x86_64) ==="
++MADEIRA_PE_ARCH=x86_64 OUT="$OUT" bash "$DIR/build-pe.sh"
++
++cp "$BUILD/src/winemetal/winemetal.dll" "$OUT/winemetal.dll"
++cp "$BUILD/src/winemetal/unix/winemetal.so" "$OUT/winemetal.so"
++cp "$BUILD/src/dxgi/dxgi.dll" "$OUT/dxgi.dll"   # DXMT's dxgi: the swapchain bridge (IMTLDXGIDevice) lives behind it
++cp "$MSC_LIB_MACOS" "$OUT/libmetalirconverter.dylib"
++echo "=== staged in $OUT ==="
++ls -l "$OUT"
+diff --git a/build/madeira-d3d12/build-pe.sh b/build/madeira-d3d12/build-pe.sh
+index a1b8cdd..ebe9af8 100755
+--- a/build/madeira-d3d12/build-pe.sh
++++ b/build/madeira-d3d12/build-pe.sh
+@@ -8,6 +8,11 @@ set -eu
+ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ REPO_ROOT="$(cd "$DIR/../.." && pwd)"
+ MINGW="$REPO_ROOT/toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin"
++# MADEIRA_PE_ARCH selects the DLL target: arm64ec (iOS Madeira, default) or
++# x86_64 (macOS Wine, see docs/MACOS_X86_64.md). The test EXEs are x86_64 either way.
++PE_ARCH="${MADEIRA_PE_ARCH:-arm64ec}"
++PE_CC="$MINGW/$PE_ARCH-w64-mingw32-clang"
++WINEMETAL_LIB="${WINEMETAL_LIB:-$REPO_ROOT/dxmt/build-$PE_ARCH/src/winemetal}"
+ SRC="$REPO_ROOT/madeira-d3d12/src/pe"
+ TESTS="$REPO_ROOT/madeira-d3d12/tests/windows"
+ OUT="${OUT:-$REPO_ROOT/build/madeira-d3d12/out-pe}"
+@@ -19,11 +24,46 @@ python3 "$SRC/gen_vtables.py" \
+     "$REPO_ROOT/toolchains/llvm-mingw-20260421-ucrt-macos-universal/generic-w64-mingw32/include/d3d12.h" \
+     "$SRC/madeira_d3d12_stubs.h" >/dev/null
+ 
+-echo "=== madeira_d3d12.dll (arm64ec) ==="
+-"$MINGW/arm64ec-w64-mingw32-clang" -shared -O2 -Wall \
++# Indirect draws on emulation pipelines need a one-thread Metal kernel
++# (indirect_mesh.metal). Built here when the Metal compiler is available and
++# embedded as a header; without it those draws stay skipped, as before.
++MSDK=macosx; [ "$PE_ARCH" = arm64ec ] && MSDK=iphoneos
++INDMESH_FLAGS=()
++if xcrun -sdk "$MSDK" -f metal >/dev/null 2>&1 && \
++   xcrun -sdk "$MSDK" metal -O2 -c "$SRC/indirect_mesh.metal" -o "$OUT/indirect_mesh.air" 2>"$OUT/indirect_mesh.log" && \
++   xcrun -sdk "$MSDK" metallib "$OUT/indirect_mesh.air" -o "$OUT/indirect_mesh.metallib" 2>>"$OUT/indirect_mesh.log"; then
++    python3 - "$OUT/indirect_mesh.metallib" "$OUT/indirect_mesh_metallib.h" <<'PYEOF'
++import sys
++d = open(sys.argv[1], 'rb').read()
++with open(sys.argv[2], 'w') as f:
++    f.write("/* GENERATED by build-pe.sh from indirect_mesh.metal -- do not edit. */\n")
++    f.write("static const unsigned char mad_indirect_mesh_metallib[%d] = {\n" % len(d))
++    for i in range(0, len(d), 16):
++        f.write("  " + ",".join("0x%02x" % b for b in d[i:i+16]) + ",\n")
++    f.write("};\n")
++PYEOF
++    INDMESH_FLAGS=(-I"$OUT" -DMADEIRA_HAVE_INDIRECT_MESH=1)
++    echo "  indirect_mesh.metallib: $(ls -l "$OUT/indirect_mesh.metallib" | awk '{print $5}') bytes ($MSDK)"
++else
++    echo "  indirect_mesh.metal not built (no Metal compiler for $MSDK, see $OUT/indirect_mesh.log); indirect draws on emulation pipelines stay skipped"
++fi
++
++# ml1152: the converter's emulated hull/domain stages read Apple's tessellator tables from the
++# buffer bound at kIRRuntimeTessellatorTablesBindPoint (object/mesh buffer 7); the runtime has to
++# provide it. The tables live in the runtime header, so turn them into a byte array here.
++TESS_FLAGS=()
++TESS_HDR="$REPO_ROOT/madeira-d3d12/third_party/metal-shader-converter/include/metal_irconverter_runtime/ir_tessellator_tables.h"
++if [ -f "$TESS_HDR" ] && python3 "$REPO_ROOT/build/madeira-d3d12/gen-tess-tables.py" "$TESS_HDR" "$OUT/tess_tables.h"; then
++    TESS_FLAGS=(-I"$OUT" -DMADEIRA_HAVE_TESS_TABLES=1)
++else
++    echo "  tessellator tables not generated ($TESS_HDR); DXIL tessellation pipelines will read them from a null pointer"
++fi
++
++echo "=== madeira_d3d12.dll ($PE_ARCH) ==="
++"$PE_CC" -shared -O2 -Wall ${INDMESH_FLAGS[@]+"${INDMESH_FLAGS[@]}"} ${TESS_FLAGS[@]+"${TESS_FLAGS[@]}"} \
+     -o "$OUT/madeira_d3d12.dll" "$SRC/madeira_d3d12.c" "$SRC/d3d12.def" \
+     -I"$SRC" -I"$REPO_ROOT/madeira-d3d12/src" -I"$REPO_ROOT/dxmt/src/winemetal" \
+-    -L"$REPO_ROOT/dxmt/build-arm64ec/src/winemetal" -lwinemetal \
++    -L"$WINEMETAL_LIB" -lwinemetal \
+     -luuid -lole32
+ echo "  built $(ls -l "$OUT/madeira_d3d12.dll" | awk '{print $5}') bytes"
+ # The same binary also ships as d3d12.dll (ml849): the engine reaches it through
+@@ -33,8 +73,8 @@ echo "  exports: $("$MINGW/llvm-objdump" --private-headers "$OUT/d3d12.dll" 2>/d
+ 
+ # The Agility SDK half: D3D12SDKVersion plus forwarders to d3d12.dll. It ships
+ # next to d3d12.dll; nothing loads it unless madeira.cfg d3d12-core-dll is set.
+-echo "=== d3d12core.dll (arm64ec) ==="
+-"$MINGW/arm64ec-w64-mingw32-clang" -shared -O2 -Wall \
++echo "=== d3d12core.dll ($PE_ARCH) ==="
++"$PE_CC" -shared -O2 -Wall \
+     -o "$OUT/d3d12core.dll" "$SRC/d3d12core.c" "$SRC/d3d12core.def"
+ echo "  built $(ls -l "$OUT/d3d12core.dll" | awk '{print $5}') bytes, $("$MINGW/llvm-readobj" --coff-exports "$OUT/d3d12core.dll" | grep -c 'ForwardedTo: d3d12\.') forwarders to d3d12.dll"
+ 
+diff --git a/build/madeira-d3d12/gen-tess-tables.py b/build/madeira-d3d12/gen-tess-tables.py
+new file mode 100644
+index 0000000..ee59b6f
+--- /dev/null
++++ b/build/madeira-d3d12/gen-tess-tables.py
+@@ -0,0 +1,27 @@
++#!/usr/bin/env python3
++"""ml1152: turn Apple's ir_tessellator_tables.h (metal_irconverter_runtime) into a C byte array.
++
++The converter's emulated hull stage reads the tessellator tables from the buffer bound at
++kIRRuntimeTessellatorTablesBindPoint (object/mesh buffer 7); the layout is what
++IRRuntimeLoadTessellatorTables writes: the 64x64x2 uint32 counts-and-offset table (32768 bytes)
++followed by the uint8 lookup table (701114 bytes). usage: gen-tess-tables.py <header> <out.h>
++"""
++import re, struct, sys
++src = re.sub(r"//[^\n]*", "", open(sys.argv[1]).read())   # the lookup table carries "// in:N out:M" comments
++def array(name):
++    m = re.search(name + r'[^=]*=\s*\{(.*?)\n\};', src, re.S)
++    return [int(x) for x in re.findall(r'\d+', m.group(1))]
++counts = array('kIRTessellatorTablesCountsAndOffset')
++lookup = array('kIRTessellatorTablesLookupTable')
++assert len(counts) == 64 * 64 * 2, len(counts)
++blob = struct.pack('<%dI' % len(counts), *counts) + bytes(lookup)
++m = re.search(r'kIRRuntimeTessellatorTablesLookupTableLength\s*=\s*(\d+)', src)
++assert len(lookup) == int(m.group(1)), (len(lookup), m.group(1))
++with open(sys.argv[2], 'w') as f:
++    f.write('/* generated by gen-tess-tables.py from ir_tessellator_tables.h; do not edit */\n')
++    f.write('static const unsigned int mad_tess_tables_len = %du;\n' % len(blob))
++    f.write('static const unsigned char mad_tess_tables[] = {\n')
++    for i in range(0, len(blob), 32):
++        f.write(','.join(str(b) for b in blob[i:i+32]) + ',\n')
++    f.write('};\n')
++print('tessellator tables: %d + %d = %d bytes' % (len(counts) * 4, len(lookup), len(blob)))
+diff --git a/docs/MACOS_X86_64.md b/docs/MACOS_X86_64.md
+new file mode 100644
+index 0000000..c6854d2
+--- /dev/null
++++ b/docs/MACOS_X86_64.md
+@@ -0,0 +1,87 @@
++# Building the D3D12 runtime for x86_64 macOS Wine
++
++Status 2026-10-12: builds; `d3d12-m2-x64.exe` 90/90, `d3d12-vfetch-x64.exe` 31/31,
++`d3d12-cube-x64.exe` presents, inside a stock x86_64 Wine 10 (Sikarugir / Porting Kit
++wrapper) on an M2 Pro, macOS 27.
++
++This is the same runtime that ships in the iOS app, built for the other shape of Wine:
++x86_64 PE modules under Rosetta, a Mach-O `winemetal.so` unixlib instead of the static
++archive linked into the app, no FEX, no remote Metal.
++
++## Inputs
++
++| Path (relative to the repo)                             | What                                                                                         |
++| -------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
++| `toolchains/llvm-mingw-20260421-ucrt-macos-universal`    | the pinned llvm-mingw (docs/BUILDING.md)                                                     |
++| `toolchains/llvm-darwin`                                 | LLVM 15.0.7 static libraries built for x86_64 as in `dxmt/configure.sh` (the `llvm-darwin` block) |
++| `toolchains/wine`                                        | a Wine SDK with `bin/winebuild`, `lib/wine/x86_64-windows/lib{winecrt0,ntdll,dbghelp}.a` and `lib/wine/x86_64-unix/{ntdll,winemac}.so`; 3Shain's `wine.tar.gz` (v8.16-3shain) is what upstream DXMT's CI uses |
++| `dxmt/toolchains -> ../toolchains`                       | the dxmt cross files resolve `@GLOBAL_SOURCE_ROOT@/toolchains/...`                           |
++| `research/GPTK/Metal Shader Converter 4.0 beta 2.pkg`    | hash-checked by `build/madeira-d3d12/deps.sh`; its macOS universal dylib ships next to winemetal.so |
++| Xcode Metal toolchain                                    | `xcodebuild -downloadComponent MetalToolchain` (Xcode 26+ ships without it)                  |
++
++## Build
++
++```sh
++bash build/madeira-d3d12/build-macos-x86_64.sh
++```
++
++Steps, each of which can be run by hand:
++
++1. `meson setup dxmt/build-x86_64 dxmt --cross-file dxmt/build-x86_64-win.txt --native-file dxmt/build-osx.txt
++   -Dbuildtype=release -Dwine_install_path=<abs toolchains/wine> -Dnative_llvm_path=<abs toolchains/llvm-darwin>
++   -Dmadeira_d3d12_path=<abs madeira-d3d12> -Dmadeira_msc_include=<converter headers> -Dmadeira_converter_id=<hash>`
++2. `ninja -C dxmt/build-x86_64 src/winemetal/winemetal.dll src/winemetal/winemetal.dll.postproc src/winemetal/unix/winemetal.so`
++   (`postproc` runs `winebuild --builtin`, which is what lets ntdll find `winemetal.so`).
++   The same ninja call builds `src/dxgi/dxgi.dll`.
++3. `MADEIRA_PE_ARCH=x86_64 bash build/madeira-d3d12/build-pe.sh` for `d3d12.dll`,
++   `madeira_d3d12.dll`, `d3d12core.dll` and the three test executables.
++
++Output: `build/madeira-d3d12/out-macos/`.
++
++## Install into a Wine tree
++
++| File                                  | Goes to                                                     |
++| ------------------------------------- | ----------------------------------------------------------- |
++| `winemetal.dll`                       | `lib/wine/x86_64-windows/` (replaces any stub of that name) |
++| `winemetal.so`, `libmetalirconverter.dylib` | `lib/wine/x86_64-unix/` (the converter is looked up next to winemetal.so) |
++| `d3d12.dll`, `d3d12core.dll`, `dxgi.dll` | the application folder, with `dxgi,d3d12,d3d12core=n,b` overrides (the swapchain is created through DXMT's dxgi, which asks the queue for IMTLDXGIDevice) |
++| test EXEs + `madeira_d3d12.dll`       | any folder; the tests load `madeira_d3d12.dll` by name      |
++
++`madeira.cfg` is read from `$HOME/Documents/madeira.cfg` of the Wine process.
++
++## What differs from the iOS build, and why
++
++- `dxmt/src/winemetal/unix/meson.build` compiles the converter service
++  (`madeira_ir_unix.mm`, `madeira_sm5_ia.cpp`, `madeira_ags.cpp`) into `winemetal.so` behind
++  `-Dmadeira_d3d12_path`; on iOS `build/dxmt-ios/build.sh` compiles the same files into the
++  app's static library. The ObjC++ archive changes meson's link driver for the .so, so the
++  target adds `-arch x86_64` itself.
++- `dxmt/src/winemetal/unix/wmt_macos_stubs.c` gives no-op bodies to the `ios_*` hooks that
++  the iOS app provides.
++- `os_proc_available_memory()` does not exist on macOS; `winemetal_unix.c` returns 0 there,
++  the value the budget code already treats as "limit unknown".
++- `madeira_ir_unix.mm` looks for the converter next to its own image before the app bundle.
++- `air_tessellation.metal`: `atomic_fetch_add_explicit` on a `threadgroup atomic_int *`, as
++  upstream 3Shain/dxmt; the private intrinsic changed arity in the Xcode 27 Metal toolchain.
++- `WMT_TRACE_RENDER=1` prints every render pass, viewport, scissor, rasterizer state, PSO
++  descriptor and draw from `winemetal.so`.
++
++## Test fixes that came out of this
++
++The tests zeroed their D3D12 descriptors and relied on defaults D3D12 does not have: a zero
++`RenderTargetWriteMask` writes nothing, a zeroed `DepthStencilState` does not depth-test, a
++zero `Shader4ComponentMapping` is "component 0 in every channel", and `Queue::Signal` is
++asynchronous. The runtime maps all of these faithfully (`mad_write_mask`, ml1061), which is
++why `vfetch_test.c`, which sets them, passed first and `m2_abi.c` and `cube_window.c` did not.
++Both now set them.
++
++## Running a game (Pioneers of Pagonia, 2026-10-12)
++
++- `MADEIRA_DOCS_DIR=<dir>` points the runtime at `<dir>/madeira.cfg` (any Wine process).
++- The video memory budget on macOS is Metal's recommended working set (`vram-mb` overrides); the
++  iOS jetsam formula reported 1024 MB here and the engine requires 1.5 GB.
++- `MakeResident`/`Evict` answer S_OK (the engine quits on E_NOTIMPL).
++- A texture asking for more mip levels than its size allows is clamped to the full chain, and views
++  past the clamp map to the last level (Metal asserts on both; the engine quits on E_INVALIDARG).
++- `MADEIRA_D3D12_TRACE_CAPS=1` logs every `CheckFeatureSupport` query and device `QueryInterface`.
++
+diff --git a/dxmt b/dxmt
+--- a/dxmt
++++ b/dxmt
+@@ -1 +1 @@
+-Subproject commit db546ee466ad50ec6463edb5fa183de11db43761
++Subproject commit db546ee466ad50ec6463edb5fa183de11db43761-dirty
+diff --git a/madeira-d3d12/src/pe/indirect_mesh.metal b/madeira-d3d12/src/pe/indirect_mesh.metal
+new file mode 100644
+index 0000000..8bff8de
+--- /dev/null
++++ b/madeira-d3d12/src/pe/indirect_mesh.metal
+@@ -0,0 +1,32 @@
++// Indirect draws on geometry/tessellation-emulation pipelines (madeira_d3d12.c,
++// exec_draw): the D3D12 argument record is GPU-written, so the object-threadgroup
++// grid the converter's draw contract needs is computed here, one thread per draw.
++//
++// Slot layout, 64 bytes (MAD_INDMESH_SLOT_BYTES), written by the CPU except where noted:
++//    0  MTLDispatchThreadgroupsIndirectArguments {x, y, z}  -- written here
++//   16  IRRuntimeDrawInfo (24 bytes, the template mad_gs_draw/mad_ts_draw built);
++//       gs_instance_count (uint16 at byte 10 of it) is patched here when asked
++//   40  {stride, overlap, set_instances, 0}
++//
++// args: the D3D12_DRAW_ARGUMENTS / D3D12_DRAW_INDEXED_ARGUMENTS record; both start
++// with {count, instance count}.
++#include <metal_stdlib>
++using namespace metal;
++
++kernel void mad_indirect_mesh(device const uint *args [[buffer(0)]],
++                              device uint *slot [[buffer(1)]],
++                              uint tid [[thread_position_in_grid]])
++{
++    if (tid != 0u) return;
++    uint count = args[0], inst = args[1];
++    uint stride = slot[10], overlap = slot[11], set_inst = slot[12];
++    uint n = count > overlap ? count - overlap : 0u;
++    if (stride == 0u) stride = 1u;
++    slot[0] = (n + stride - 1u) / stride;
++    slot[1] = inst ? inst : 1u;
++    slot[2] = 1u;
++    if (set_inst) {
++        uint w = slot[4 + 2];
++        slot[4 + 2] = (w & 0x0000ffffu) | (((inst ? inst : 1u) & 0xffffu) << 16);
++    }
++}
+diff --git a/madeira-d3d12/src/pe/madeira_d3d12.c b/madeira-d3d12/src/pe/madeira_d3d12.c
+index d4d359d..a0eed50 100644
+--- a/madeira-d3d12/src/pe/madeira_d3d12.c
++++ b/madeira-d3d12/src/pe/madeira_d3d12.c
+@@ -154,6 +154,17 @@ static int g_occlusion_visible = -1;   /* ml1103: madeira.cfg occlusion-visible
+  * texture the pixel stage samples) and their resolved argument tables logged
+  * range by range. Answers "bad source or bad composite" for one draw. */
+ static char g_capture_ps[512]; static int g_capture_ps_loaded, g_capture_ps_shots, g_dump_tables;   /* ml1152: a comma list */
++static long long mad_cfg_int_pe(const char *key, long long dflt);
++static int mad_capture_tess_on(void) {   /* madeira.cfg capture-tess = 1: the draw capture also takes DXIL tessellation draws (terrain in Pioneers of Pagonia) */
++    static int on = -1;
++    if (on < 0) on = mad_cfg_int_pe("capture-tess", 0) ? 1 : 0;
++    return on;
++}
++static long long mad_capture_rt_w(void) {   /* madeira.cfg capture-rt-w = N: the draw capture also takes draws whose first colour target is N pixels wide */
++    static long long w = -1;
++    if (w < 0) w = mad_cfg_int_pe("capture-rt-w", 0);
++    return w;
++}
+ /* ml1141: TARGETED DISPATCH CAPTURE, the compute twin of the above. madeira.cfg
+  * capture-cs = <compute entry name> (capture-cs-indirect = 1 keeps only indirect
+  * dispatches, capture-cs-max = N, default 12): during a CAP frame the first N
+@@ -232,6 +243,14 @@ struct mad_device {
+      * which was a GPU page fault that killed the whole queue. They now point
+      * at 64 KB of zeros instead. */
+     obj_handle_t null_buffer; UINT64 null_gpu;
++    /* ml1152: Apple's tessellator tables (ir_tessellator_tables.h), bound at
++     * kIRRuntimeTessellatorTablesBindPoint = 7 for the object and mesh stages of
++     * every DXIL tessellation draw. Without it the emulated hull stage reads its
++     * vertex-count/offset tables from address 0 (+row): Metal shader validation
++     * reported "Invalid load ... at GPU address 0x1248, executing object function
++     * vs_main.dxil_irconverter_object_shader" on every terrain patch, and the
++     * patch constants (the terrain's material INDEX) came out as garbage. */
++    obj_handle_t tess_tables;
+     struct mad_queue *queues[16]; unsigned nqueues;   /* ml884: every live queue, for flush-all */
+     /* ml910: GPU-ordered capture of what a draw actually receives. Blits run
+      * in the same command buffer right before the draw, so they see the
+@@ -298,6 +317,19 @@ static LONG g_tview_live, g_tview_made, g_xview_live;   /* ml1126 */
+ static LONG g_resolve_locked, g_resolve_miss;   /* ml1132: address lookups that took live_lock */
+ static LONG g_res_added, g_res_removed, g_tess_psos, g_tess_draws, g_tess_built, g_tess_drawn, g_tess_nonidx;
+ static LONG g_dtess_drawn, g_dtess_bad_cps;   /* DXIL tessellation through the converter's emulation */
++/* ml1160: draw-kind census for the perf log (per 5 s period): plain draws, GS-emulation mesh
++ * draws (direct / indirect) with their object-threadgroup totals, DXIL tessellation draws with
++ * theirs, DXBC tessellation draws, dispatches. */
++static LONG g_dc_plain, g_dc_gs, g_dc_gs_ind, g_dc_dtess, g_dc_dtess_ind, g_dc_tess, g_dc_disp; static LONG64 g_dc_gs_tg, g_dc_dtess_tg, g_dc_plain_inst;
++/* ml1161: madeira.cfg diag-skip = <mask>, re-read every perf period (5 s) so it can be changed while
++ * the game runs: 1 skips plain draws, 2 GS-emulation mesh draws, 4 DXIL tessellation draws, 8
++ * dispatches. Attribution experiment only: the picture breaks accordingly. */
++static volatile LONG g_diag_skip;
++static int g_state_elide = -1; static LONG g_st_cmds, g_st_elided;   /* ml1162 */
++/* ml1164: where the caller-thread time of exec_draw goes, in rdtsc ticks per perf period:
++ * 0 begin_render, 1 root slot + chain build, 2 use-resource loops, 3 encodeCommands, 4 rest. */
++static LONG64 g_dt_phase[5]; static LONG64 g_dt_tsc0; static double g_dt_tsc_hz;
++#define MAD_TSC() ((LONG64)__builtin_ia32_rdtsc())
+ static LONG g_gs_built, g_gs_drawn;   /* ml1147 */
+ static LONG g_vis_begun, g_vis_resolved, g_vis_nonzero, g_vis_restarts;   /* ml1088 */
+ static LONG g_srv_clamped; static float g_srv_clamp_max;   /* ml1089 */
+@@ -327,9 +359,22 @@ static int mad_upload_swap_on(void);
+ static volatile LONG64 g_lib_bytes; static volatile LONG g_lib_count;   /* ml1060: metallib bytes handed to newLibrary */
+ static void mad_acct(struct mad_resource *r, unsigned cat, UINT64 bytes, int sign);
+ static void mad_acct_report(void);
++/* ml1152: MTLResidencySet is not thread-safe. Resources are added from the
++ * application's creation threads while the queue thread commits the set;
++ * under the Metal tools layer that was a hard NSGenericException inside
++ * -[MTLToolsResidencySet commit] ("mutated while being enumerated"). */
++static SRWLOCK g_resset_lock = SRWLOCK_INIT;
++static void mad_resset_commit(struct mad_device *d) {
++    if (!d || !d->resset || !InterlockedExchange(&d->resset_dirty, 0)) return;
++    AcquireSRWLockExclusive(&g_resset_lock);
++    MTLResidencySet_commit(d->resset);
++    ReleaseSRWLockExclusive(&g_resset_lock);
++}
+ static void mad_resident(struct mad_device *d, obj_handle_t h) {
+     if (!d || !h || !d->resset) return;
++    AcquireSRWLockExclusive(&g_resset_lock);
+     MTLResidencySet_addAllocation(d->resset, h);
++    ReleaseSRWLockExclusive(&g_resset_lock);
+     InterlockedIncrement(&g_res_added);
+     InterlockedExchange(&d->resset_dirty, 1);
+ }
+@@ -340,7 +385,9 @@ static void mad_resident(struct mad_device *d, obj_handle_t h) {
+  * the next command buffer. */
+ static void mad_unresident(struct mad_device *d, obj_handle_t h) {
+     if (!d || !h || !d->resset) return;
++    AcquireSRWLockExclusive(&g_resset_lock);
+     MTLResidencySet_removeAllocation(d->resset, h);
++    ReleaseSRWLockExclusive(&g_resset_lock);
+     InterlockedIncrement(&g_res_removed);
+     InterlockedExchange(&d->resset_dirty, 1);
+ }
+@@ -1422,6 +1469,12 @@ struct mad_exec {
+     /* resources already declared (useResource) on the current encoder, see mad_use_seen */
+     obj_handle_t ud_enc; unsigned ud_n, ud_committed;
+     struct { obj_handle_t h; UINT32 usage, stages; } ud[96];
++    /* ml1162: render state already encoded on `enc`; a draw skips the commands that would
++     * repeat it (madeira.cfg state-elide = 0 restores a full state set per draw). */
++    struct { obj_handle_t enc; obj_handle_t pso; int vp_ok, sc_ok, dss_ok, bl_ok, ras_ok; D3D12_VIEWPORT vp;
++             UINT64 sc[4]; obj_handle_t dsso; UINT8 dss_ref, bl_ref; float bl[4];
++             struct wmtcmd_render_setrasterizerstate ras; obj_handle_t vbbuf[16]; UINT64 vboff[16]; } st;
++    int st_pending;
+ };
+ static void mad_capture_pass(struct mad_exec *e, struct mad_resource **rt, unsigned nrt, const struct mad_rtvp *rtp,
+                              struct mad_resource *depth, const struct mad_rtvp *dp, unsigned seq);
+@@ -1930,8 +1983,8 @@ static void mad_capture_draw_inputs(struct mad_exec *e, const struct mad_cmd *c)
+     g_enc_seq++;
+     exec_fence_blit(e, benc, 0);
+     memset(&v0, 0, sizeof v0); v0.layers = 1;
+-    d3d12_log("[capture-draw] ml1106 ===== draw with ps='%s' vs='%s' after enc#%u: kind=%d topo=%u inputs follow =====\n",
+-              e->pso->ps_name, e->pso->vs_name, seq, (int)c->kind, (unsigned)e->topo);
++    d3d12_log("[capture-draw] ml1106 ===== draw with ps='%s' vs='%s' pso=%p after enc#%u: kind=%d topo=%u inputs follow =====\n",
++              e->pso->ps_name, e->pso->vs_name, (void *)e->pso, seq, (int)c->kind, (unsigned)e->topo);
+     for (k = 0; k < 16; k++) if (e->vb[k].res) mad_capture_buffer(e, benc, e->vb[k].res, e->vb[k].off, 65536, "vb", k, seq);
+     if (e->ib) mad_capture_buffer(e, benc, e->ib, e->ib_off, 65536, "ib", 0, seq);
+     if ((c->kind == MC_DRAW_INDIRECT || c->kind == MC_DRAW_INDEXED_INDIRECT) && c->u.ind.args)
+@@ -1957,6 +2010,93 @@ static void mad_capture_draw_inputs(struct mad_exec *e, const struct mad_cmd *c)
+                   (unsigned long long)de.texture_view_id, r->name ? r->name : "?", r->width, r->height, (unsigned)r->tex_pf, (unsigned)r->desc.Format, r->tex_mips, r->tex_layers, xv);
+         if (said_tex++ < 64) mad_capture_one(e, benc, r, &v0, seq, 100 + rg->lower_bound, "tex", 0);
+     }
++    if (!e->pso->ps_nair && e->rs) {   /* converter (DXIL) pipeline: the root signature's tables, first 16 entries each, and their textures */
++        unsigned i;
++        for (i = 0; i < e->rs->nparams && i < MAD_ROOT_PARAM_MAX; i++) {   /* the whole root layout and what this draw bound */
++            const struct madeira_ir_root_param *rp = &e->rs->params[i]; UINT64 va = e->root[i]; unsigned q; char line[600]; int n;
++            static const char *const tn[5] = { "TABLE", "CONSTANTS", "CBV", "SRV", "UAV" };
++            static const char *const rn[4] = { "SRV", "UAV", "CBV", "SMP" };
++            n = snprintf(line, sizeof line, "[capture-draw] root p%u %s vis%u reg%u space%u value=0x%llx%s", i, rp->type < 5 ? tn[rp->type] : "?", rp->visibility,
++                         rp->shader_register, rp->register_space, (unsigned long long)va,
++                         rp->type == MADEIRA_IR_PARAM_TABLE && va && e->srv && va >= e->srv->gpu_address && va < e->srv->gpu_address + (UINT64)e->srv->count * sizeof(struct mad_descriptor) ? " (SRV heap)" :
++                         rp->type == MADEIRA_IR_PARAM_TABLE && va && e->smp && va >= e->smp->gpu_address && va < e->smp->gpu_address + (UINT64)e->smp->count * sizeof(struct mad_descriptor) ? " (sampler heap)" :
++                         rp->type == MADEIRA_IR_PARAM_TABLE ? " (NO HEAP)" : "");
++            for (q = 0; q < rp->num_ranges && rp->first_range + q < e->rs->nranges && n < (int)sizeof line - 60; q++) {
++                const struct madeira_ir_root_range *rg = &e->rs->ranges[rp->first_range + q];
++                n += snprintf(line + n, sizeof line - n, " [%s x%u @%c%u s%u off%d]", rg->range_type < 4 ? rn[rg->range_type] : "?", rg->num_descriptors,
++                              "tucs"[rg->range_type & 3], rg->base_register, rg->register_space, rg->table_offset == 0xffffffffu ? -1 : (int)rg->table_offset);
++            }
++            d3d12_log("%s\n", line);
++        }
++        for (i = 0; i < e->rs->nparams && i < MAD_ROOT_PARAM_MAX; i++) {
++            UINT64 va = e->root[i]; unsigned idx;
++            if (e->rs->params[i].type == MADEIRA_IR_PARAM_CBV && va) {   /* root constant buffers: the first KB of each */
++                UINT64 off = 0; struct mad_resource *br = mad_resolve_address(e->q->device, va, &off);
++                if (br && br->buffer) mad_capture_buffer(e, benc, br, off, 65536, "cb", i, seq);   /* ml1152: 64 KB, the whole D3D constant buffer range (a bindless material table is 512+ records) */
++                else d3d12_log("[capture-draw] root p%u CBV va=0x%llx resolves to no live buffer\n", i, (unsigned long long)va);
++                continue;
++            }
++            if (e->rs->params[i].type != MADEIRA_IR_PARAM_TABLE || !va || !e->srv || !e->srv->cpu) continue;
++            if (va < e->srv->gpu_address || va >= e->srv->gpu_address + (UINT64)e->srv->count * sizeof(struct mad_descriptor)) continue;
++            idx = (unsigned)((va - e->srv->gpu_address) / sizeof(struct mad_descriptor));
++            {   /* only the descriptors the parameter's ranges actually span (capped at 16) */
++                unsigned span = 0, q;
++                for (q = 0; q < e->rs->params[i].num_ranges && e->rs->params[i].first_range + q < e->rs->nranges; q++) {
++                    const struct madeira_ir_root_range *rg = &e->rs->ranges[e->rs->params[i].first_range + q];
++                    unsigned nd = rg->num_descriptors == 0xffffffffu ? 16u : rg->num_descriptors, end = (rg->table_offset == 0xffffffffu ? span : rg->table_offset) + nd;
++                    if (end > span) span = end;
++                }
++                if (span > 16) span = 16;
++                if (!span) span = 1;
++            /* ml1150: a bindless table (one huge range) is indexed from a constant
++             * buffer; madeira.cfg capture-heap-a / capture-heap-b name two heap
++             * indices and 8 entries from each are dumped too (k >= 1000 marks them). */
++            {   static long long ha = -2, hb = -2; unsigned hx[16], nhx = 0, big = 0, t;
++                { ha = mad_cfg_int_pe("capture-heap-a", -1); hb = mad_cfg_int_pe("capture-heap-b", -1); }   /* ml1153: re-read per capture, the indices are only known after a first capture */
++                for (q = 0; q < e->rs->params[i].num_ranges && e->rs->params[i].first_range + q < e->rs->nranges; q++)
++                    if (e->rs->ranges[e->rs->params[i].first_range + q].num_descriptors > 16) big = 1;
++                if (big && ha >= 0) for (t = 0; t < 8; t++) hx[nhx++] = (unsigned)ha + t;
++                if (big && hb >= 0) for (t = 0; t < 8; t++) hx[nhx++] = (unsigned)hb + t;
++                if (big) {   /* ml1152: every entry of the first 16K that is not empty and not a 1x1 placeholder, one compact line each */
++                    static unsigned listed; unsigned n1 = 0, nz = 0, nb = 0, j; char line[400]; int c = 0;
++                    for (j = 0; j < 16384 && idx + j < e->srv->count && listed < 4; j++) {
++                        const struct mad_descriptor *de = &e->srv->cpu[idx + j]; struct mad_resource *r; int xv = -1;
++                        if (!de->texture_view_id) { if (de->gpu_va) nb++; else nz++; continue; }
++                        r = mad_texture_of_view(e->q->device, de->texture_view_id, &xv);
++                        if (r && r->width == 1 && r->height == 1) { n1++; continue; }
++                        c += snprintf(line + c, sizeof line - c, " %u:%ux%u/%u/%u", idx + j, r ? r->width : 0, r ? r->height : 0, r ? r->tex_layers : 0, r ? (unsigned)r->desc.Format : 0);
++                        if (c > 300) { d3d12_log("[capture-heap] p%u%s\n", i, line); c = 0; }
++                    }
++                    if (c) d3d12_log("[capture-heap] p%u%s\n", i, line);
++                    if (listed++ < 4) d3d12_log("[capture-heap] p%u: of the first 16384 entries %u are 1x1 placeholders, %u buffers, %u empty\n", i, n1, nb, nz);
++                }
++            for (k = 0; k < span + nhx && idx + k < e->srv->count; k++) {
++                unsigned kk = k < span ? k : hx[k - span];
++                const struct mad_descriptor *de = &e->srv->cpu[idx + kk]; int xv = -1; struct mad_resource *r;
++                if (idx + kk >= e->srv->count) continue;
++                if (de->texture_view_id) {
++                    r = mad_texture_of_view(e->q->device, de->texture_view_id, &xv);
++                    d3d12_log("[capture-draw] p%u[%u] view %llu -> %s %ux%u layers %u mips %u dx%u pf%u (subview %d) meta 0x%llx\n", i, kk,
++                              (unsigned long long)de->texture_view_id, r ? (r->name ? r->name : "?") : "NO RESOURCE", r ? r->width : 0, r ? r->height : 0,
++                              r ? r->tex_layers : 0, r ? r->tex_mips : 0, r ? (unsigned)r->desc.Format : 0, r ? (unsigned)r->tex_pf : 0, xv,
++                              (unsigned long long)de->metadata);
++                    if (r && r->texture && said_tex < 200) {   /* every mip level, or every slice of an array: a streamed texture may hold placeholders in some */
++                        struct mad_rtvp v = v0; UINT lv;
++                        if (r->tex_layers > 1 && r->tex_layers <= 16) {
++                            char kind[8];
++                            for (lv = 0; lv < r->tex_layers && said_tex < 200; lv++) { v.slice = lv; said_tex++; snprintf(kind, sizeof kind, "s%u", lv); mad_capture_one(e, benc, r, &v, seq, 100 + i * 16 + kk, kind, 0); }
++                        } else { said_tex++; mad_capture_one(e, benc, r, &v, seq, 100 + i * 16 + kk, "tex", 0); }
++                    }
++                } else if (de->gpu_va) {
++                    UINT64 off = 0; r = mad_resolve_address(e->q->device, de->gpu_va, &off);
++                    d3d12_log("[capture-draw] p%u[%u] buffer va=0x%llx -> %s +%llu meta 0x%llx\n", i, kk, (unsigned long long)de->gpu_va,
++                              r ? (r->name ? r->name : "?") : "NO RESOURCE", (unsigned long long)off, (unsigned long long)de->metadata);
++                }
++            }
++            }
++            }
++        }
++    }
+     exec_fence_blit(e, benc, 1);
+     MTLCommandEncoder_endEncoding(benc);
+ }
+@@ -3740,6 +3880,59 @@ static int mad_use_seen(struct mad_exec *e, obj_handle_t enc, obj_handle_t h, UI
+     return 0;
+ }
+ 
++/* ---- indirect draws on geometry/tessellation-emulation pipelines ----------
++ * A mesh pipeline's grid is a threadgroup count, not a vertex count, so an
++ * ExecuteIndirect record written by the GPU cannot be used as Metal's indirect
++ * buffer directly. indirect_mesh.metal (embedded at build time when the Metal
++ * compiler is available) runs one thread per such draw: it reads the record,
++ * writes MTLDispatchThreadgroupsIndirectArguments and patches the draw info's
++ * instance count into a 64-byte slot of a shared scratch buffer, and the draw
++ * goes out as drawMeshThreadgroupsWithIndirectBuffer on that slot. Slots are a
++ * ring; a draw more than MAD_INDMESH_SLOTS indirect emulation draws back
++ * would be overwritten while possibly still in flight (not seen: Pioneers of
++ * Pagonia issues a handful per frame). */
++#ifdef MADEIRA_HAVE_TESS_TABLES
++#include "tess_tables.h"   /* ml1152: generated by build-pe.sh (gen-tess-tables.py) */
++#endif
++#ifdef MADEIRA_HAVE_INDIRECT_MESH
++#include "indirect_mesh_metallib.h"
++#endif
++#define MAD_INDMESH_SLOTS      1024u
++#define MAD_INDMESH_SLOT_BYTES 64u
++#define MAD_INDMESH_DRAWINFO   16u   /* IRRuntimeDrawInfo template inside the slot */
++#define MAD_INDMESH_PARAMS     40u   /* {stride, overlap, set_instances, 0} */
++static struct { obj_handle_t pso, buf; void *cpu; int tried; LONG cursor; } g_indmesh;
++static int mad_indmesh_init(struct mad_device *d) {
++#ifdef MADEIRA_HAVE_INDIRECT_MESH
++    obj_handle_t dd, lib = 0, fn = 0, err = 0;
++    struct WMTComputePipelineInfo ci; struct WMTBufferInfo bi;
++    if (g_indmesh.pso) return 1;
++    if (g_indmesh.tried) return 0;
++    g_indmesh.tried = 1;
++    dd = DispatchData_alloc_init((uint64_t)(uintptr_t)mad_indirect_mesh_metallib, (uint64_t)sizeof mad_indirect_mesh_metallib);
++    if (dd) { lib = MTLDevice_newLibrary(d->mtl_device, dd, &err); NSObject_release(dd); }
++    if (err) mad_log_nserror("indirect-mesh kernel library", err);
++    if (lib) fn = MTLLibrary_newFunction(lib, "mad_indirect_mesh");
++    if (!fn) { d3d12_log("[madeira-d3d12] indirect-mesh kernel: the embedded library has no 'mad_indirect_mesh'\n"); if (lib) NSObject_release(lib); return 0; }
++    memset(&ci, 0, sizeof ci); ci.compute_function = fn; err = 0;
++    g_indmesh.pso = MTLDevice_newComputePipelineState(d->mtl_device, &ci, &err);
++    if (err) mad_log_nserror("indirect-mesh kernel pipeline", err);
++    NSObject_release(fn); NSObject_release(lib);
++    if (!g_indmesh.pso) return 0;
++    memset(&bi, 0, sizeof bi); bi.length = MAD_INDMESH_SLOTS * MAD_INDMESH_SLOT_BYTES; bi.options = WMTResourceStorageModeShared;
++    g_indmesh.buf = MTLDevice_newBuffer(d->mtl_device, &bi);
++    if (!g_indmesh.buf || !bi.memory.ptr) { d3d12_log("[madeira-d3d12] indirect-mesh kernel: no scratch buffer\n"); g_indmesh.pso = 0; return 0; }
++    g_indmesh.cpu = bi.memory.ptr;
++    memset(g_indmesh.cpu, 0, (size_t)bi.length);
++    mad_resident(d, g_indmesh.buf);
++    d3d12_log("[madeira-d3d12] indirect draws on emulation pipelines: dispatch kernel ready (%u scratch slots)\n", MAD_INDMESH_SLOTS);
++    return 1;
++#else
++    (void)d;
++    return 0;
++#endif
++}
++
+ static void exec_draw(struct mad_exec *e, const struct mad_cmd *c) {
+     struct wmtcmd_render_setpso c_pso;
+     struct wmtcmd_render_draw_indirect c_di;
+@@ -3754,15 +3947,17 @@ static void exec_draw(struct mad_exec *e, const struct mad_cmd *c) {
+     struct wmtcmd_render_draw c_draw;
+     struct wmtcmd_render_draw_indexed c_dix;
+     struct wmtcmd_render_draw_meshthreadgroups c_mesh;   /* ml927 */
++    struct wmtcmd_render_draw_meshthreadgroups_indirect c_meshi; int ind_mesh = 0; UINT64 ind_off = 0;   /* GPU-written indirect arguments, see mad_indmesh_init */
+     struct wmtcmd_render_dxmt_geometry_draw c_gd; struct wmtcmd_render_dxmt_geometry_draw_indexed c_gdi; UINT64 gs_daboff = 0;   /* ml1147 */
+     struct wmtcmd_render_setvisibilitymode c_vis;         /* ml1088 */
+     struct mad_gs_drawinfo gdi; int gsemu;
+     struct mad_tess *tv = NULL; unsigned tfmt = 0;   /* ml1083: the tessellation pipeline and index-format variant in use */
+-    struct wmtcmd_base *tail;
++    struct wmtcmd_base *tail, *head = NULL;
+     obj_handle_t argbuf = 0; UINT64 argoff = 0;
+     unsigned nsb = 0, nur = 0, i, arg_slot_used = 0;
+     static unsigned said_nopso, said_trunc;
+     struct mad_device *dev = e->q->device;
++    LONG64 dt_t0 = MAD_TSC(), dt_t1 = 0, dt_t2 = 0, dt_t3 = 0;   /* ml1164 */
+ 
+     /* ml1094: InstanceCount 0 draws NOTHING in D3D12; it was promoted to 1 below
+      * (Astra). An engine that zeroes the count of a culled draw would have drawn
+@@ -3775,14 +3970,74 @@ static void exec_draw(struct mad_exec *e, const struct mad_cmd *c) {
+         return;
+     }
+     gsemu = e->pso->gs_emu;
++    if (g_diag_skip) {   /* ml1161 */
++        LONG m = g_diag_skip;
++        if ((gsemu == 2 && (m & 4)) || (gsemu == 1 && (m & 2)) || (!gsemu && (m & 1))) return;
++        if (gsemu == 2 && ((m & 16) && !e->nrt)) return;    /* 16: tessellation draws into depth-only passes (shadow maps) */
++        if (gsemu == 2 && ((m & 32) && e->nrt)) return;     /* 32: tessellation draws with a colour target */
++    }
+     if (gsemu && (c->kind == MC_DRAW_INDIRECT || c->kind == MC_DRAW_INDEXED_INDIRECT)) {
+-        static unsigned said; if (said++ < 4) d3d12_log("[madeira-d3d12] indirect draw on a geometry-shader pipeline is not implemented; skipped\n");
+-        MAD_SKIP(e); return;
++        /* An indirect draw on a geometry/tessellation-emulation pipeline needs
++         * its threadgroup grid from the argument record. When the record lives
++         * in a CPU-visible buffer (an UPLOAD heap the application filled before
++         * ExecuteCommandLists; this replay runs on the calling thread), read it
++         * here and run the draw as a direct one. Pioneers of Pagonia renders
++         * its ground-texture pages this way, and every page stayed empty while
++         * these were skipped. GPU-written records (DEFAULT heaps) would need a
++         * dispatch kernel this runtime does not have; they stay skipped. */
++        const struct mad_resource *a = c->u.ind.args;
++        UINT need = c->kind == MC_DRAW_INDIRECT ? 16u : 20u;
++        if (a && a->cpu && c->u.ind.off + need <= a->size) {
++            struct mad_cmd t = *c;
++            const UINT32 *w = (const UINT32 *)((const unsigned char *)a->cpu + c->u.ind.off);
++            static unsigned said_cpu;
++            if (c->kind == MC_DRAW_INDIRECT) { t.kind = MC_DRAW; t.u.draw.vcount = w[0]; t.u.draw.icount = w[1]; t.u.draw.vstart = w[2]; t.u.draw.istart = w[3]; }
++            else { t.kind = MC_DRAW_INDEXED; t.u.drawi.icount = w[0]; t.u.drawi.inst = w[1]; t.u.drawi.start = w[2]; t.u.drawi.base = (INT)w[3]; t.u.drawi.istart = w[4]; }
++            if (said_cpu++ < 2) d3d12_log("[madeira-d3d12] indirect draw on a geometry-shader pipeline: CPU-visible arguments (%u, %u, %u, %u) replayed as a direct draw\n", w[0], w[1], w[2], w[3]);
++            exec_draw(e, &t);
++            return;
++        }
++        if (a && a->buffer && mad_indmesh_init(e->q->device)) {
++            /* GPU-written record: the kernel runs in a compute encoder before the
++             * render pass (exec_begin_render below reopens it, as a dispatch
++             * between draws does); its slot is filled further down, before the
++             * command buffer is committed. */
++            struct wmtcmd_compute_setpso k_pso; struct wmtcmd_compute_setbuffer k_b0, k_b1;
++            struct wmtcmd_compute_useresource k_u0, k_u1; struct wmtcmd_compute_dispatch k_d;
++            unsigned slot = (unsigned)InterlockedIncrement(&g_indmesh.cursor) % MAD_INDMESH_SLOTS;
++            static unsigned said_gpu;
++            ind_off = (UINT64)slot * MAD_INDMESH_SLOT_BYTES;
++            if (!e->cenc) {
++                if (e->renc) InterlockedIncrement(&g_pass_end_dispatch);
++                exec_end(e);
++                e->cenc = MTLCommandBuffer_computeCommandEncoder(e->cb, false); if (e->cenc) g_enc_seq++;
++                if (!e->cenc) { MAD_SKIP(e); return; }
++                exec_fence_compute(e, e->cenc, 0);
++            }
++            memset(&k_pso, 0, sizeof k_pso); k_pso.type = WMTComputeCommandSetPSO; k_pso.pso = g_indmesh.pso;
++            k_pso.threadgroup_size.width = 1; k_pso.threadgroup_size.height = 1; k_pso.threadgroup_size.depth = 1;
++            memset(&k_b0, 0, sizeof k_b0); k_b0.type = WMTComputeCommandSetBuffer; k_b0.buffer = a->buffer; k_b0.offset = c->u.ind.off; k_b0.index = 0;
++            memset(&k_b1, 0, sizeof k_b1); k_b1.type = WMTComputeCommandSetBuffer; k_b1.buffer = g_indmesh.buf; k_b1.offset = ind_off; k_b1.index = 1;
++            memset(&k_u0, 0, sizeof k_u0); k_u0.type = WMTComputeCommandUseResource; k_u0.resource = a->buffer; k_u0.usage = WMTResourceUsageRead;
++            memset(&k_u1, 0, sizeof k_u1); k_u1.type = WMTComputeCommandUseResource; k_u1.resource = g_indmesh.buf; k_u1.usage = WMTResourceUsageWrite;
++            memset(&k_d, 0, sizeof k_d); k_d.type = WMTComputeCommandDispatch; k_d.size.width = 1; k_d.size.height = 1; k_d.size.depth = 1;
++            k_pso.next.ptr = &k_b0; k_b0.next.ptr = &k_b1; k_b1.next.ptr = &k_u0; k_u0.next.ptr = &k_u1; k_u1.next.ptr = &k_d; k_d.next.ptr = NULL;
++            MTLComputeCommandEncoder_encodeCommands(e->cenc, (const struct wmtcmd_base *)&k_pso);
++            if (said_gpu++ < 2) d3d12_log("[madeira-d3d12] indirect draw on a geometry-shader pipeline: GPU-written arguments, grid computed by the dispatch kernel\n");
++            ind_mesh = 1;
++        } else {
++            static unsigned said; if (said++ < 4) d3d12_log("[madeira-d3d12] indirect draw on a geometry-shader pipeline with GPU-written arguments: no dispatch kernel in this build; skipped\n");
++            MAD_SKIP(e); return;
++        }
+     }
+     if (g_census_on) { exec_capture_draw(e, c); exec_desc_check(e, e->rs, e->root, e->pso->vs_name); }   /* ml910/ml913 */
+     if (!exec_begin_render(e)) { MAD_SKIP(e); return; }
++    dt_t1 = MAD_TSC();   /* ml1164 */
+     g_dump_tables = 0;
+-    if (g_capture_on && g_capture_ps[0] && e->pso->ps_name[0] && strstr(g_capture_ps, e->pso->ps_name) && g_capture_ps_shots < 8) {   /* ml1106; ml1152: any listed ps, 8 shots */
++    if (g_capture_on && g_capture_ps_shots < 8 &&
++        ((g_capture_ps[0] && e->pso->ps_name[0] && strstr(g_capture_ps, e->pso->ps_name)) ||
++         (mad_capture_tess_on() && e->pso->gs_emu == 2 && e->pso->ps_name[0]) ||
++         (mad_capture_rt_w() > 0 && e->enc_nrt && e->enc_rt[0] && e->enc_rt[0]->width == (UINT)mad_capture_rt_w()))) {   /* ml1106; ml1152: any listed ps, 8 shots; capture-tess = 1: DXIL tessellation draws with a pixel shader; capture-rt-w = N: draws into an N-wide target */
+         g_capture_ps_shots++;
+         mad_capture_draw_inputs(e, c);
+         if (!exec_begin_render(e)) { MAD_SKIP(e); return; }
+@@ -3831,9 +4086,50 @@ static void exec_draw(struct mad_exec *e, const struct mad_cmd *c) {
+         }
+     }
+ tess_go:
++    {   /* ml1152 diagnostic: madeira.cfg dtess-matprobe = 1 redirects the pixel stage's highest
++         * constant buffer of a DXIL tessellation draw (the bindless material table) to a 2048-record
++         * table whose records all name three real heap textures: a tile whose INDEX is below 2048 then
++         * shows that texture, a tile with a garbage INDEX stays black. */
++        static int on = -1; static obj_handle_t pb; static UINT64 pgpu; static int filled;
++        if (on < 0) on = mad_cfg_int_pe("dtess-matprobe", 0) ? 1 : 0;
++        if (on && e->pso && e->pso->gs_emu == 2 && e->pso->ps_fn && e->rs && e->srv && e->srv->cpu) {
++            unsigned i, best = ~0u, bestreg = 0, big = 0;
++            for (i = 0; i < e->rs->nranges; i++) if (e->rs->ranges[i].num_descriptors > 16) big = 1;
++            for (i = 0; i < e->rs->nparams && i < MAD_ROOT_PARAM_MAX; i++)
++                if (e->rs->params[i].type == MADEIRA_IR_PARAM_CBV && e->rs->params[i].visibility == MADEIRA_IR_VIS_PIXEL &&
++                    (best == ~0u || e->rs->params[i].shader_register > bestreg)) { best = i; bestreg = e->rs->params[i].shader_register; }
++            if (big && best != ~0u) {
++                if (!pb) {
++                    struct WMTBufferInfo bi; memset(&bi, 0, sizeof bi); bi.length = 65536; bi.options = WMTResourceStorageModeShared;
++                    pb = MTLDevice_newBuffer(dev->mtl_device, &bi);
++                    if (pb && bi.memory.ptr) {
++                        unsigned k, n = 0, idx[3] = { 0, 0, 0 };
++                        for (k = 1; k < e->srv->count && k < 4096 && n < 3; k++) {
++                            const struct mad_descriptor *de = &e->srv->cpu[k]; int xv = -1; struct mad_resource *r;
++                            if (!de->texture_view_id) continue;
++                            r = mad_texture_of_view(dev, de->texture_view_id, &xv);
++                            if (r && r->width >= 64 && r->height >= 64 && r->tex_layers == 1) idx[n++] = k;
++                        }
++                        for (k = 0; k < 2048; k++) {
++                            float *f = (float *)((unsigned char *)bi.memory.ptr + k * 32); UINT32 *u = (UINT32 *)(f + 4);
++                            f[0] = 0.05f; f[1] = 0.05f; f[2] = 0.0f; f[3] = 0.0f; u[0] = idx[0]; u[1] = idx[1]; u[2] = idx[2]; u[3] = 0;
++                        }
++                        pgpu = bi.gpu_address; mad_resident(dev, pb); filled = 1;
++                        d3d12_log("[madeira-d3d12] ml1152 material probe: 2048 records -> heap %u %u %u, replacing root p%u (b%u)\n", idx[0], idx[1], idx[2], best, bestreg);
++                    } else { if (pb) NSObject_release(pb); pb = 0; on = 0; }
++                }
++                if (filled) e->root[best] = pgpu;
++            }
++        }
++    }
+     if (!exec_arg_slot(e, &argbuf, &argoff)) { MAD_SKIP(e); return; }
+     arg_slot_used = e->l->ring_used - 1;   /* ml1084: the slot exec_arg_slot took, see the draw-params block */
+ 
++    if (g_state_elide < 0) { g_state_elide = mad_cfg_int_pe("state-elide", 1) ? 1 : 0;
++                             d3d12_log("[madeira-d3d12] ml1162 state-elide = %d (%s)\n", g_state_elide, g_state_elide ? "a draw repeats only the render state that changed since the previous draw of its encoder" : "full state set per draw"); }
++    /* ml1162: a draw that returned between the chain build and the encode left e->st half updated */
++    if (e->st_pending || e->st.enc != e->renc || !g_state_elide) { memset(&e->st, 0, sizeof e->st); e->st.enc = e->renc; }
++    e->st_pending = 1;
+     memset(&c_pso, 0, sizeof c_pso); c_pso.type = WMTRenderCommandSetPSO; c_pso.pso = tv ? tv->obj[tfmt].rps : e->pso->rps;
+     if (e->pso->has_vd && !gsemu && !tv) {
+         UINT strides[16];
+@@ -3844,9 +4140,12 @@ tess_go:
+         for (i = 0; i < 16; i++) strides[i] = e->vb[i].res ? e->vb[i].stride : e->pso->vb_stride[i];
+         c_pso.pso = mad_pso_for_strides(e->pso, strides);
+     }
+-    tail = (struct wmtcmd_base *)&c_pso;
+-#define MAD_APPEND(node) do { tail->next.ptr = (node); tail = (struct wmtcmd_base *)(node); } while (0)
+-    if (e->has_vp) {
++    tail = (struct wmtcmd_base *)&c_pso; head = NULL;
++#define MAD_APPEND(node) do { if (!head) head = (struct wmtcmd_base *)(node); else tail->next.ptr = (node); tail = (struct wmtcmd_base *)(node); g_st_cmds++; } while (0)
++    if (e->st.pso != c_pso.pso) { MAD_APPEND(&c_pso); e->st.pso = c_pso.pso; } else g_st_elided++;
++    if (e->has_vp && e->st.vp_ok && !memcmp(&e->st.vp, &e->vp, sizeof e->vp)) g_st_elided++;
++    else if (e->has_vp) {
++        e->st.vp = e->vp; e->st.vp_ok = 1;
+         memset(&c_vp, 0, sizeof c_vp); c_vp.type = WMTRenderCommandSetViewport;
+         c_vp.viewport.originX = e->vp.TopLeftX; c_vp.viewport.originY = e->vp.TopLeftY;
+         c_vp.viewport.width = e->vp.Width; c_vp.viewport.height = e->vp.Height;
+@@ -3862,10 +4161,15 @@ tess_go:
+         if (tw && x1 > (LONG)tw) x1 = (LONG)tw;
+         if (th && y1 > (LONG)th) y1 = (LONG)th;
+         if (x1 > x0 && y1 > y0) {
+-            memset(&c_sc, 0, sizeof c_sc); c_sc.type = WMTRenderCommandSetScissorRect;
+-            c_sc.scissor_rect.x = (UINT64)x0; c_sc.scissor_rect.y = (UINT64)y0;
+-            c_sc.scissor_rect.width = (UINT64)(x1 - x0); c_sc.scissor_rect.height = (UINT64)(y1 - y0);
+-            MAD_APPEND(&c_sc);
++            UINT64 r4[4] = { (UINT64)x0, (UINT64)y0, (UINT64)(x1 - x0), (UINT64)(y1 - y0) };
++            if (e->st.sc_ok && !memcmp(e->st.sc, r4, sizeof r4)) g_st_elided++;
++            else {
++                memcpy(e->st.sc, r4, sizeof r4); e->st.sc_ok = 1;
++                memset(&c_sc, 0, sizeof c_sc); c_sc.type = WMTRenderCommandSetScissorRect;
++                c_sc.scissor_rect.x = r4[0]; c_sc.scissor_rect.y = r4[1];
++                c_sc.scissor_rect.width = r4[2]; c_sc.scissor_rect.height = r4[3];
++                MAD_APPEND(&c_sc);
++            }
+         }
+     }
+     memset(sb, 0, sizeof sb);
+@@ -3950,8 +4254,11 @@ tess_go:
+      * Keep the two compilers' binding ABIs apart. */
+     if (!gsemu && !tv && e->pso->backend == MADEIRA_IR_BACKEND_MSC) {
+         for (i = 0; i < 16; i++)
+-            if (e->vb[i].res && e->vb[i].res->buffer)
++            if (e->vb[i].res && e->vb[i].res->buffer) {
++                if (e->st.vbbuf[i] == e->vb[i].res->buffer && e->st.vboff[i] == e->vb[i].off) { g_st_elided++; continue; }   /* ml1162 */
++                e->st.vbbuf[i] = e->vb[i].res->buffer; e->st.vboff[i] = e->vb[i].off;
+                 MAD_SETBUF(WMTRenderCommandSetVertexBuffer, e->vb[i].res->buffer, e->vb[i].off, (uint8_t)(6 + i));
++            }
+     }
+     /* ml912: the converter's draw contract (metal_irconverter_runtime.h,
+      * IRRuntimeDraw*): every vertex stage that reads SV_VertexID /
+@@ -3992,19 +4299,44 @@ tess_go:
+         if (gsemu) {
+             /* ml927: the emulation helpers take the ELEMENT start index and fold
+              * the index-buffer byte offset into the buffer address. */
+-            UINT pt = mad_gs_prim(e->topo), count = c->kind == MC_DRAW_INDEXED ? c->u.drawi.icount : c->u.draw.vcount;
++            UINT pt = mad_gs_prim(e->topo), count = c->kind == MC_DRAW_INDEXED ? c->u.drawi.icount : c->kind == MC_DRAW ? c->u.draw.vcount : 0;
+             UINT inst = dp[1]; UINT64 ibaddr = 0;
+             struct WMTSize grid, otg, mtg;
+             struct { UINT64 addr; UINT32 length, stride; } vbt[31];
+-            if (c->kind == MC_DRAW_INDEXED) { dp[2] = c->u.drawi.start; if (e->ib) ibaddr = e->ib->gpu_address + e->ib_off; }
++            if (c->kind == MC_DRAW_INDEXED) dp[2] = c->u.drawi.start;
++            if ((c->kind == MC_DRAW_INDEXED || c->kind == MC_DRAW_INDEXED_INDIRECT) && e->ib) ibaddr = e->ib->gpu_address + e->ib_off;
+             if (gsemu == 2) mad_ts_draw(e->pso, inst, count, kind, ibaddr, &gdi, &grid, &otg, &mtg);
+             else mad_gs_draw(pt, e->pso->gs_vertex_size, e->pso->gs_max_prims, inst, count, kind, ibaddr, &gdi, &grid, &otg, &mtg);
+             memset(&c_mesh, 0, sizeof c_mesh); c_mesh.type = WMTRenderCommandDrawMeshThreadgroups;
+             c_mesh.threadgroup_per_grid = grid; c_mesh.object_threadgroup_size = otg; c_mesh.mesh_threadgroup_size = mtg;
++            {   /* ml1160 census */
++                LONG64 tg = (LONG64)grid.width * (grid.height ? grid.height : 1) * (grid.depth ? grid.depth : 1);
++                if (gsemu == 2) { InterlockedIncrement(ind_mesh ? &g_dc_dtess_ind : &g_dc_dtess); if (!ind_mesh) InterlockedExchangeAdd64(&g_dc_dtess_tg, tg); }
++                else { InterlockedIncrement(ind_mesh ? &g_dc_gs_ind : &g_dc_gs); if (!ind_mesh) InterlockedExchangeAdd64(&g_dc_gs_tg, tg); }
++            }
++            if (ind_mesh) {   /* the kernel's slot: draw-info template and grid parameters (see indirect_mesh.metal) */
++                unsigned char *sc = (unsigned char *)g_indmesh.cpu + ind_off;
++                UINT32 prm[4];
++                prm[0] = gsemu == 2 ? e->pso->dt.patches_per_tg * e->pso->dt.input_cps : gdi.obj_vertex_stride;
++                prm[1] = gsemu == 2 ? 0 : mad_gs_overlap(pt);
++                prm[2] = gsemu == 2 ? 0 : 1;   /* the geometry contract carries the draw's instance count in the draw info */
++                prm[3] = 0;
++                memset(sc, 0, MAD_INDMESH_SLOT_BYTES);
++                memcpy(sc + MAD_INDMESH_DRAWINFO, &gdi, sizeof gdi);
++                memcpy(sc + MAD_INDMESH_PARAMS, prm, sizeof prm);
++                memset(&c_meshi, 0, sizeof c_meshi); c_meshi.type = WMTRenderCommandDrawMeshThreadgroupsIndirect;
++                c_meshi.indirect_args_buffer = g_indmesh.buf; c_meshi.indirect_args_offset = ind_off;
++                c_meshi.object_threadgroup_size = otg; c_meshi.mesh_threadgroup_size = mtg;
++                if (gsemu == 2) { c_meshi.reserved[0] = (uint16_t)MAD_DTESS_OBJECT_TG_MEM; c_meshi.reserved[1] = 0x7e55; }
++            }
+             if (gsemu == 2) {   /* DXIL tessellation: object threadgroup memory (winemetal reads the marked reserved words) */
+                 c_mesh.reserved[0] = (uint16_t)MAD_DTESS_OBJECT_TG_MEM; c_mesh.reserved[1] = 0x7e55;
+                 MAD_SETBUF(WMTRenderCommandSetObjectBuffer, argbuf, argoff, 3);   /* kIRArgumentBufferHullDomainBindPoint */
+                 MAD_SETBUF(WMTRenderCommandSetMeshBuffer, argbuf, argoff, 3);
++                if (dev->tess_tables) {   /* ml1152: kIRRuntimeTessellatorTablesBindPoint, hull (object) and tessellator (mesh) */
++                    MAD_SETBUF(WMTRenderCommandSetObjectBuffer, dev->tess_tables, 0, 7);
++                    MAD_SETBUF(WMTRenderCommandSetMeshBuffer, dev->tess_tables, 0, 7);
++                }
+                 InterlockedIncrement(&g_dtess_drawn);
+             }
+             memset(vbt, 0, sizeof vbt);
+@@ -4019,15 +4351,17 @@ tess_go:
+         memcpy(cpu + MAD_ARG_DRAWPARAMS_OFF, dp, sizeof dp);
+         memcpy(cpu + MAD_ARG_DRAWINFO_OFF, &gdi, sizeof gdi);
+         if ((c->kind == MC_DRAW_INDIRECT || c->kind == MC_DRAW_INDEXED_INDIRECT) && c->u.ind.args && c->u.ind.args->buffer)
+-            MAD_SETBUF(WMTRenderCommandSetVertexBuffer, c->u.ind.args->buffer, c->u.ind.off, 4);
++            MAD_SETBUF_VS(c->u.ind.args->buffer, c->u.ind.off, 4);   /* the object stage of an emulation pipeline reads them too */
+         else
+             MAD_SETBUF_VS(argbuf, argoff + MAD_ARG_DRAWPARAMS_OFF, 4);
+-        MAD_SETBUF_VS(argbuf, argoff + MAD_ARG_DRAWINFO_OFF, 5);
++        if (ind_mesh) MAD_SETBUF_VS(g_indmesh.buf, ind_off + MAD_INDMESH_DRAWINFO, 5);
++        else MAD_SETBUF_VS(argbuf, argoff + MAD_ARG_DRAWINFO_OFF, 5);
+     }
+ #undef MAD_SETBUF_VS
+ #undef MAD_SETBUF
+     /* ml1130: no 8 KB clear per draw; each entry is zeroed as it is used */
+     const UINT32 use_stages = (UINT32)((gsemu || tv) ? (WMTRenderStageObject | WMTRenderStageMesh | WMTRenderStageFragment) : (WMTRenderStageVertex | WMTRenderStageFragment));
++    dt_t2 = MAD_TSC();   /* ml1164 */
+     mad_use_begin(e, e->renc);
+ #define MAD_USE_U(h, u) do { if ((h) && nur < 256 && !mad_use_seen(e, e->renc, (h), (UINT32)(u), use_stages)) { \
+         memset(&ur[nur], 0, sizeof ur[nur]); ur[nur].type = WMTRenderCommandUseResource; ur[nur].resource = (h); \
+@@ -4039,6 +4373,8 @@ tess_go:
+     if (gsemu || tv || e->pso->backend == MADEIRA_IR_BACKEND_AIRCONV) {   /* ml927: the object stage reads vertices and indices through the tables, not encoder bindings; ml1105: so does the DXBC vertex stage */
+         for (i = 0; i < 16; i++) if (e->vb[i].res) MAD_USE(e->vb[i].res->buffer);
+         if (e->ib) MAD_USE(e->ib->buffer);
++        if ((c->kind == MC_DRAW_INDIRECT || c->kind == MC_DRAW_INDEXED_INDIRECT) && c->u.ind.args) MAD_USE(c->u.ind.args->buffer);
++        if (ind_mesh) MAD_USE(g_indmesh.buf);
+     }
+     for (i = e->l->nused > 64 ? e->l->nused - 64 : 0; i < e->l->nused; i++) {
+         struct mad_resource *r = e->l->used[i];
+@@ -4068,21 +4404,32 @@ tess_go:
+         d3d12_log("[madeira-d3d12] residency list truncated at 256 per draw (%u views); a real residency set is owed\n", dev->nsrv);
+ #undef MAD_USE
+ #undef MAD_USE_U
++    dt_t3 = MAD_TSC();   /* ml1164 */
+     if (e->enc_depth && (e->pso->dsso || dev->dsso)) {
+-        memset(&c_dss, 0, sizeof c_dss); c_dss.type = WMTRenderCommandSetDSSO;
+-        c_dss.dsso = e->pso->dsso ? e->pso->dsso : dev->dsso;
+-        c_dss.stencil_ref = (uint8_t)e->stencil_ref;
+-        MAD_APPEND(&c_dss);
++        obj_handle_t d = e->pso->dsso ? e->pso->dsso : dev->dsso;
++        if (e->st.dss_ok && e->st.dsso == d && e->st.dss_ref == (UINT8)e->stencil_ref) g_st_elided++;   /* ml1162 */
++        else {
++            e->st.dss_ok = 1; e->st.dsso = d; e->st.dss_ref = (UINT8)e->stencil_ref;
++            memset(&c_dss, 0, sizeof c_dss); c_dss.type = WMTRenderCommandSetDSSO;
++            c_dss.dsso = d;
++            c_dss.stencil_ref = (uint8_t)e->stencil_ref;
++            MAD_APPEND(&c_dss);
++        }
+     }
+     if (e->has_blend) {
+-        memset(&c_bl, 0, sizeof c_bl); c_bl.type = WMTRenderCommandSetBlendFactorAndStencilRef;
+-        c_bl.red = e->blend[0]; c_bl.green = e->blend[1]; c_bl.blue = e->blend[2]; c_bl.alpha = e->blend[3];
+-        c_bl.stencil_ref = (uint8_t)e->stencil_ref;
+-        MAD_APPEND(&c_bl);
++        if (e->st.bl_ok && !memcmp(e->st.bl, e->blend, sizeof e->st.bl) && e->st.bl_ref == (UINT8)e->stencil_ref) g_st_elided++;   /* ml1162 */
++        else {
++            e->st.bl_ok = 1; memcpy(e->st.bl, e->blend, sizeof e->st.bl); e->st.bl_ref = (UINT8)e->stencil_ref;
++            memset(&c_bl, 0, sizeof c_bl); c_bl.type = WMTRenderCommandSetBlendFactorAndStencilRef;
++            c_bl.red = e->blend[0]; c_bl.green = e->blend[1]; c_bl.blue = e->blend[2]; c_bl.alpha = e->blend[3];
++            c_bl.stencil_ref = (uint8_t)e->stencil_ref;
++            MAD_APPEND(&c_bl);
++        }
+     }
+     c_ras = e->pso->raster;
+     c_ras.next.ptr = NULL;
+-    MAD_APPEND(&c_ras);
++    if (e->st.ras_ok && !memcmp(&e->st.ras.fill_mode, &c_ras.fill_mode, sizeof c_ras - (size_t)((const char *)&c_ras.fill_mode - (const char *)&c_ras))) g_st_elided++;   /* ml1162 */
++    else { e->st.ras_ok = 1; e->st.ras = c_ras; MAD_APPEND(&c_ras); }
+     for (i = 0; i < 16; i++) {
+         if (!(e->pso->vb_mask & (1u << i)) || !e->vb[i].res) continue;
+         /* ml878: stride differences are handled by mad_pso_for_strides above */
+@@ -4183,12 +4530,13 @@ tess_go:
+         c_mesh.object_threadgroup_size.width = tpp; c_mesh.object_threadgroup_size.height = ppg; c_mesh.object_threadgroup_size.depth = 1;
+         c_mesh.mesh_threadgroup_size.width = 32; c_mesh.mesh_threadgroup_size.height = 1; c_mesh.mesh_threadgroup_size.depth = 1;
+         MAD_APPEND(&c_mesh);
+-        InterlockedIncrement(&g_tess_drawn);
++        InterlockedIncrement(&g_tess_drawn); InterlockedIncrement(&g_dc_tess);   /* ml1160 */
+         if (c->kind == MC_DRAW) InterlockedIncrement(&g_tess_nonidx);
+     } else if (gsemu) {   /* ml927 */
+-        if (c->kind == MC_DRAW_INDEXED && (!e->ib || !e->ib->buffer)) { MAD_SKIP(e); tail->next.ptr = NULL; return; }
+-        MAD_APPEND(&c_mesh);
++        if ((c->kind == MC_DRAW_INDEXED || c->kind == MC_DRAW_INDEXED_INDIRECT) && (!e->ib || !e->ib->buffer)) { MAD_SKIP(e); tail->next.ptr = NULL; return; }
++        if (ind_mesh) MAD_APPEND(&c_meshi); else MAD_APPEND(&c_mesh);
+     } else if (c->kind == MC_DRAW_INDEXED_INDIRECT) {
++        InterlockedIncrement(&g_dc_plain);   /* ml1160 */
+         if (!e->ib || !e->ib->buffer) { MAD_SKIP(e); tail->next.ptr = NULL; return; }
+         memset(&c_dii, 0, sizeof c_dii);
+         c_dii.type = WMTRenderCommandDrawIndexedIndirect;
+@@ -4200,6 +4548,7 @@ tess_go:
+         c_dii.indirect_args_offset = c->u.ind.off;
+         MAD_APPEND(&c_dii);
+     } else if (c->kind == MC_DRAW_INDIRECT) {
++        InterlockedIncrement(&g_dc_plain);   /* ml1160 */
+         memset(&c_di, 0, sizeof c_di);
+         c_di.type = WMTRenderCommandDrawIndirect;
+         c_di.primitive_type = mad_prim(e->topo);
+@@ -4219,6 +4568,7 @@ tess_go:
+         c_dix.base_vertex = c->u.drawi.base;
+         c_dix.base_instance = c->u.drawi.istart;
+         MAD_APPEND(&c_dix);
++        InterlockedIncrement(&g_dc_plain); InterlockedExchangeAdd64(&g_dc_plain_inst, c_dix.instance_count);   /* ml1160 */
+     } else {
+         memset(&c_draw, 0, sizeof c_draw);
+         c_draw.type = WMTRenderCommandDraw;
+@@ -4228,6 +4578,7 @@ tess_go:
+         c_draw.instance_count = c->u.draw.icount ? c->u.draw.icount : 1;
+         c_draw.base_instance = c->u.draw.istart;
+         MAD_APPEND(&c_draw);
++        InterlockedIncrement(&g_dc_plain); InterlockedExchangeAdd64(&g_dc_plain_inst, c_draw.instance_count);   /* ml1160 */
+     }
+     {   /* ml1088: count this draw into the current slot while a query is open.
+          * Placed last so a skipped draw above never leaves the encoder's mode
+@@ -4239,17 +4590,22 @@ tess_go:
+             memset(&c_vis, 0, sizeof c_vis); c_vis.type = WMTRenderCommandSetVisibilityMode;
+             if (want == ~(UINT64)0) { c_vis.mode = WMTVisibilityResultModeDisabled; c_vis.offset = 0; }
+             else { c_vis.mode = WMTVisibilityResultModeCounting; c_vis.offset = (want % MAD_VIS_SLOTS) * 8; }
+-            c_vis.next.ptr = &c_pso;
++            c_vis.next.ptr = head;
+             e->vis_prev = want;
+             tail->next.ptr = NULL;
+             MTLRenderCommandEncoder_encodeCommands(e->renc, (const struct wmtcmd_base *)&c_vis);
+         } else {
+             tail->next.ptr = NULL;
+-            MTLRenderCommandEncoder_encodeCommands(e->renc, (const struct wmtcmd_base *)&c_pso);
++            if (head) MTLRenderCommandEncoder_encodeCommands(e->renc, head);
+         }
+         if (want != ~(UINT64)0) v->dirty = 1;
+     }
+     mad_use_commit(e);   /* this draw's useResource entries reached the encoder */
++    e->st_pending = 0;   /* ml1162: the state recorded in e->st is on the encoder */
++    {   /* ml1164 */
++        LONG64 t4 = MAD_TSC();
++        g_dt_phase[0] += dt_t1 - dt_t0; g_dt_phase[1] += dt_t2 - dt_t1; g_dt_phase[2] += dt_t3 - dt_t2; g_dt_phase[3] += t4 - dt_t3;
++    }
+ #undef MAD_APPEND
+     e->draws++; e->pass_draws++;   /* ml1098 */
+     if (e->nrt && e->rt[0] && e->rtp[0].layers > 1) {   /* ml926: layered draws */
+@@ -4294,19 +4650,21 @@ static UINT mad_aspect_bpp(const struct mad_resource *r, UINT plane) {
+     mad_format_info(r->desc.Format, &bytes, &block);
+     return block == 1 ? bytes : 0;
+ }
+-static void exec_copy_aspect(struct mad_exec *e, const struct mad_cmd *c) {
++/* ml1153: a texture copy that Metal's blit cannot do in one step goes through
++ * the device's staging buffer: the source region is copied out as rows of
++ * `row` bytes, then copied in as a region of the destination. Row and image
++ * pitches are the same on both sides; only the extents differ when one side
++ * is block-compressed (D3D12 reinterprets a 64-bit texel as one BC1/BC4 block,
++ * a 128-bit one as a BC2/3/5/6/7 block: GPU texture compressors write the
++ * blocks into an R32G32_UINT or R32G32B32A32_UINT render target and copy them
++ * into the compressed texture). */
++static int exec_copy_staged(struct mad_exec *e, const struct mad_cmd *c, UINT64 row, UINT64 img, UINT depth,
++                            UINT sw, UINT sh, UINT dw, UINT dh, UINT sopt, UINT dopt) {
+     const struct mad_resource *s = c->u.tt.src, *d = c->u.tt.dst;
+     struct mad_device *dev = e->q->device;
+-    UINT sb = mad_aspect_bpp(s, c->u.tt.splane), db = mad_aspect_bpp(d, c->u.tt.dplane);
+-    UINT64 row = (UINT64)c->u.tt.w * sb, img = row * c->u.tt.h, need = img * (c->u.tt.d ? c->u.tt.d : 1);
++    UINT64 need = img * (depth ? depth : 1);
+     struct wmtcmd_blit_copy_from_texture_to_buffer k1; struct wmtcmd_blit_copy_from_buffer_to_texture k2;
+-    static LONG said;
+-    if (!sb || sb != db || !need) {
+-        if (InterlockedIncrement(&said) <= 16)
+-            d3d12_log("[madeira-d3d12] plane copy '%s' plane %u (%u B/px) -> '%s' plane %u (%u B/px): sizes differ, skipped\n",
+-                      s->name ? s->name : "?", c->u.tt.splane, sb, d->name ? d->name : "?", c->u.tt.dplane, db);
+-        MAD_SKIP(e); return;
+-    }
++    if (!need) return 0;
+     EnterCriticalSection(&dev->heap_lock);
+     if (dev->ds_scratch_size < need) {
+         struct WMTBufferInfo bi; UINT64 sz = need < (4u << 20) ? (4u << 20) : (need + 0xffff) & ~(UINT64)0xffff;
+@@ -4317,29 +4675,77 @@ static void exec_copy_aspect(struct mad_exec *e, const struct mad_cmd *c) {
+         dev->ds_scratch_size = dev->ds_scratch ? sz : 0;
+     }
+     LeaveCriticalSection(&dev->heap_lock);
+-    if (!dev->ds_scratch) { MAD_SKIP(e); return; }
+-    if (InterlockedIncrement(&said) <= 16)
+-        d3d12_log("[madeira-d3d12] plane copy '%s' %s -> '%s' %s, %ux%u through a staging buffer\n",
+-                  s->name ? s->name : "?", s->is_depth ? (c->u.tt.splane ? "stencil" : "depth") : "colour",
+-                  d->name ? d->name : "?", d->is_depth ? (c->u.tt.dplane ? "stencil" : "depth") : "colour", c->u.tt.w, c->u.tt.h);
++    if (!dev->ds_scratch) return 0;
+     memset(&k1, 0, sizeof k1);
+     k1.type = WMTBlitCommandCopyFromTextureToBuffer;
+     k1.src = s->texture; k1.slice = c->u.tt.sslice; k1.level = c->u.tt.slevel;
+     k1.origin.x = c->u.tt.sx; k1.origin.y = c->u.tt.sy; k1.origin.z = c->u.tt.sz;
+-    k1.size.width = c->u.tt.w; k1.size.height = c->u.tt.h; k1.size.depth = c->u.tt.d ? c->u.tt.d : 1;
++    k1.size.width = sw; k1.size.height = sh; k1.size.depth = depth ? depth : 1;
+     k1.dst = dev->ds_scratch; k1.offset = 0; k1.bytes_per_row = (UINT32)row; k1.bytes_per_image = (UINT32)img;
+-    k1.options = mad_aspect_opt(s, c->u.tt.splane);
++    k1.options = sopt;
+     MTLBlitCommandEncoder_encodeCommands(e->benc, (const struct wmtcmd_base *)&k1);
+     exec_end(e);   /* the staging buffer is written, then read: two encoders */
+-    if (!exec_begin_blit(e)) { MAD_SKIP(e); return; }
++    if (!exec_begin_blit(e)) return 0;
+     memset(&k2, 0, sizeof k2);
+     k2.type = WMTBlitCommandCopyFromBufferToTexture;
+     k2.src = dev->ds_scratch; k2.src_offset = 0; k2.bytes_per_row = (UINT32)row; k2.bytes_per_image = (UINT32)img;
+-    k2.size.width = c->u.tt.w; k2.size.height = c->u.tt.h; k2.size.depth = c->u.tt.d ? c->u.tt.d : 1;
++    k2.size.width = dw; k2.size.height = dh; k2.size.depth = depth ? depth : 1;
+     k2.dst = d->texture; k2.slice = c->u.tt.dslice; k2.level = c->u.tt.dlevel;
+     k2.origin.x = c->u.tt.dx; k2.origin.y = c->u.tt.dy; k2.origin.z = c->u.tt.dz;
+-    k2.reserved[0] = (uint16_t)mad_aspect_opt(d, c->u.tt.dplane);   /* the MTLBlitOption; winemetal honours it for a combined depth-stencil destination */
++    k2.reserved[0] = (uint16_t)dopt;   /* the MTLBlitOption; winemetal honours it for a combined depth-stencil destination */
+     MTLBlitCommandEncoder_encodeCommands(e->benc, (const struct wmtcmd_base *)&k2);
++    return 1;
++}
++
++/* ml1153: the copy between a block-compressed texture and an uncompressed one
++ * whose texel is one block (see exec_copy_staged). Extents in the command are
++ * in SOURCE texels; the destination's are scaled by the block size and
++ * clamped to its mip. Returns 0 when the pair is not such a copy. */
++static int exec_copy_reinterpret(struct mad_exec *e, const struct mad_cmd *c) {
++    const struct mad_resource *s = c->u.tt.src, *d = c->u.tt.dst;
++    UINT sb = 0, sblk = 1, db = 0, dblk = 1, dw, dh, dd, sw = c->u.tt.w, sh = c->u.tt.h, ew, eh;
++    UINT64 row, img;
++    static LONG said;
++    if (s->is_depth || d->is_depth) return 0;
++    mad_format_info(s->desc.Format, &sb, &sblk); mad_format_info(d->desc.Format, &db, &dblk);
++    if (!sb || !db || sblk == dblk) return 0;
++    if (sb != db) {
++        if (InterlockedIncrement(&said) <= 8)
++            d3d12_log("[madeira-d3d12] texture copy '%s' (%u B/block%u) -> '%s' (%u B/block%u): sizes differ, skipped\n",
++                      s->name ? s->name : "?", sb, sblk, d->name ? d->name : "?", db, dblk);
++        MAD_SKIP(e); return 1;
++    }
++    mad_mip_dims(d, c->u.tt.dlevel, &dw, &dh, &dd);
++    if (sblk == 1) { ew = sw * dblk; eh = sh * dblk; }                       /* uncompressed -> compressed */
++    else { ew = (sw + sblk - 1) / sblk; eh = (sh + sblk - 1) / sblk; }      /* compressed -> uncompressed */
++    if (c->u.tt.dx >= dw || c->u.tt.dy >= dh) { MAD_SKIP(e); return 1; }
++    if (ew > dw - c->u.tt.dx) ew = dw - c->u.tt.dx;
++    if (eh > dh - c->u.tt.dy) eh = dh - c->u.tt.dy;
++    row = (UINT64)((sw + sblk - 1) / sblk) * sb; img = row * ((sh + sblk - 1) / sblk);
++    if (InterlockedIncrement(&said) <= 8)
++        d3d12_log("[madeira-d3d12] ml1153 texture copy '%s' fmt %u %ux%u -> '%s' fmt %u %ux%u at %u,%u through a staging buffer\n",
++                  s->name ? s->name : "?", (unsigned)s->desc.Format, sw, sh, d->name ? d->name : "?", (unsigned)d->desc.Format, ew, eh, c->u.tt.dx, c->u.tt.dy);
++    if (!exec_copy_staged(e, c, row, img, c->u.tt.d, sw, sh, ew, eh, 0, 0)) MAD_SKIP(e);
++    return 1;
++}
++
++static void exec_copy_aspect(struct mad_exec *e, const struct mad_cmd *c) {
++    const struct mad_resource *s = c->u.tt.src, *d = c->u.tt.dst;
++    UINT sb = mad_aspect_bpp(s, c->u.tt.splane), db = mad_aspect_bpp(d, c->u.tt.dplane);
++    UINT64 row = (UINT64)c->u.tt.w * sb, img = row * c->u.tt.h;
++    static LONG said;
++    if (!sb || sb != db || !img) {
++        if (InterlockedIncrement(&said) <= 16)
++            d3d12_log("[madeira-d3d12] plane copy '%s' plane %u (%u B/px) -> '%s' plane %u (%u B/px): sizes differ, skipped\n",
++                      s->name ? s->name : "?", c->u.tt.splane, sb, d->name ? d->name : "?", c->u.tt.dplane, db);
++        MAD_SKIP(e); return;
++    }
++    if (InterlockedIncrement(&said) <= 16)
++        d3d12_log("[madeira-d3d12] plane copy '%s' %s -> '%s' %s, %ux%u through a staging buffer\n",
++                  s->name ? s->name : "?", s->is_depth ? (c->u.tt.splane ? "stencil" : "depth") : "colour",
++                  d->name ? d->name : "?", d->is_depth ? (c->u.tt.dplane ? "stencil" : "depth") : "colour", c->u.tt.w, c->u.tt.h);
++    if (!exec_copy_staged(e, c, row, img, c->u.tt.d, c->u.tt.w, c->u.tt.h, c->u.tt.w, c->u.tt.h,
++                          mad_aspect_opt(s, c->u.tt.splane), mad_aspect_opt(d, c->u.tt.dplane))) MAD_SKIP(e);
+ }
+ 
+ #define MAD_FILLPAT_BYTES (256u << 10)   /* ml1151: one exact UAV-clear pattern buffer */
+@@ -4446,6 +4852,7 @@ static void exec_copy(struct mad_exec *e, const struct mad_cmd *c) {
+             exec_copy_aspect(e, c);   /* a depth or stencil plane to or from a colour texture */
+             return;
+         }
++        if (c->u.tt.src->tex_pf != c->u.tt.dst->tex_pf && exec_copy_reinterpret(e, c)) return;   /* ml1153 */
+         memset(&k, 0, sizeof k);
+         k.type = WMTBlitCommandCopyFromTextureToTexture;
+         k.src = c->u.tt.src->texture; k.src_slice = c->u.tt.sslice; k.src_level = c->u.tt.slevel;
+@@ -4482,6 +4889,7 @@ static obj_handle_t mad_resolve_view(struct mad_resource *r, enum WMTPixelFormat
+     uint64_t id = 0;
+     sw.r = (enum WMTTextureSwizzle)2; sw.g = (enum WMTTextureSwizzle)3;   /* identity, as MAD_SWZ_IDENTITY */
+     sw.b = (enum WMTTextureSwizzle)4; sw.a = (enum WMTTextureSwizzle)5;
++    if (level >= r->tex_mips && r->tex_mips) level = r->tex_mips - 1;   /* see mad_texinfo_from_desc: the chain may be shorter than the application asked */
+     return MTLTexture_newTextureView(r->texture, pf, WMTTextureType2D, (uint16_t)level, 1, (uint16_t)slice, 1, sw, &id);
+ }
+ 
+@@ -4784,8 +5192,16 @@ static void mad_exec_list(struct mad_queue *q, struct mad_list *l, obj_handle_t
+         case MC_DRAW: case MC_DRAW_INDEXED: exec_draw(&e, c); break;
+         case MC_DRAW_INDIRECT: case MC_DRAW_INDEXED_INDIRECT: case MC_DISPATCH_INDIRECT: {
+             struct mad_cmd t = *c; UINT k;
++            UINT nrec = c->u.ind.count;
+             if (!c->u.ind.args || !c->u.ind.args->buffer) { e.skipped++; break; }
+-            for (k = 0; k < c->u.ind.count; k++) {
++            /* A CPU-visible count buffer is honoured (the application wrote it before
++             * ExecuteCommandLists; this replay runs on that thread). GPU-written counts
++             * still issue every record. */
++            if (c->u.ind.cnt && c->u.ind.cnt->cpu && c->u.ind.cnt_off + 4 <= c->u.ind.cnt->size) {
++                UINT32 cb = *(const UINT32 *)((const unsigned char *)c->u.ind.cnt->cpu + c->u.ind.cnt_off);
++                if (cb < nrec) nrec = cb;
++            }
++            for (k = 0; k < nrec; k++) {
+                 t.u.ind.off = c->u.ind.off + (UINT64)k * c->u.ind.stride;
+                 if (c->kind == MC_DISPATCH_INDIRECT) exec_dispatch(&e, &t); else exec_draw(&e, &t);
+             }
+@@ -4793,7 +5209,7 @@ static void mad_exec_list(struct mad_queue *q, struct mad_list *l, obj_handle_t
+         }
+         case MC_COPY_BB: case MC_COPY_B2T: case MC_COPY_T2B: case MC_COPY_T2T: case MC_FILL_BB: case MC_FILL_TEX: exec_copy(&e, c); break;
+         case MC_BLEND_FACTOR: memcpy(e.blend, c->u.blend.rgba, sizeof e.blend); e.has_blend = 1; break;
+-        case MC_DISPATCH: exec_dispatch(&e, c); break;
++        case MC_DISPATCH: InterlockedIncrement(&g_dc_disp); if (!(g_diag_skip & 8)) exec_dispatch(&e, c); break;   /* ml1160, ml1161 */
+         case MC_RESOLVE: exec_resolve(&e, c); break;
+         }
+     }
+@@ -4882,8 +5298,7 @@ static void mad_ecl_run(ID3D12CommandQueue *This, UINT count, ID3D12CommandList
+             continue;
+         }
+         if (!q->open_cb) {
+-            if (q->device->resset && InterlockedExchange(&q->device->resset_dirty, 0))
+-                MTLResidencySet_commit(q->device->resset);
++            mad_resset_commit(q->device);
+             mad_queue_revive(q->device);   /* ml1067 */
+             q->open_cb = MTLCommandQueue_commandBuffer(q->device->mtl_queue);
+             if (!q->open_cb) { d3d12_log("[madeira-d3d12] no command buffer\n"); q->rejected++; continue; }
+@@ -5045,6 +5460,31 @@ static void mad_perf_present(void) {
+                           g_perf_presents ? (double)g_perf_resetwaits / g_perf_presents : 0.0,
+                           g_perf_presents ? 1000.0 * g_perf_waitjob_ticks / (double)fq.QuadPart / g_perf_presents : 0.0);
+             g_perf_worker_ticks = g_perf_drain_ticks = g_perf_resetwait_ticks = g_perf_waitjob_ticks = 0; g_perf_jobs = g_perf_resetwaits = 0;
++            {   /* ml1161 */
++                LONG m = (LONG)mad_cfg_int_pe("diag-skip", 0);
++                if (m != g_diag_skip) { InterlockedExchange(&g_diag_skip, m); d3d12_log("[perf] ml1161 diag-skip = %ld (1 plain, 2 gs-mesh, 4 dxil-tess, 8 dispatch, 16 tess depth-only, 32 tess colour)\n", (long)m); }
++            }
++            {   /* ml1164 */
++                LONG64 now_tsc = MAD_TSC(); double per = g_perf_presents ? (double)g_perf_presents : 1.0;
++                if (g_dt_tsc0) {
++                    double hz = (double)(now_tsc - g_dt_tsc0) / wall, k = 1000.0 / (hz > 1 ? hz : 1) / per;
++                    d3d12_log("[perf] ml1164 exec_draw caller ms per frame: begin_render %.2f, slot+chain %.2f, use-loops %.2f, encode+state %.2f (tsc %.2f GHz)\n",
++                              g_dt_phase[0] * k, g_dt_phase[1] * k, g_dt_phase[2] * k, g_dt_phase[3] * k, hz / 1e9);
++                }
++                g_dt_tsc0 = now_tsc; memset(g_dt_phase, 0, sizeof g_dt_phase);
++            }
++            if (g_perf_presents) {   /* ml1162 */
++                LONG sc = InterlockedExchange(&g_st_cmds, 0), se = InterlockedExchange(&g_st_elided, 0);
++                d3d12_log("[perf] ml1162 render commands per frame: %.0f encoded, %.0f elided as unchanged state\n", (double)sc / g_perf_presents, (double)se / g_perf_presents);
++            }
++            if (g_perf_presents) {   /* ml1160: draw-kind census per frame */
++                double np = (double)g_perf_presents;
++                d3d12_log("[perf] ml1160 draws per frame: plain %.0f (%.0f instances), gs-mesh %.0f (+%.0f indirect, %.0f object TGs), dxil-tess %.0f (+%.0f indirect, %.0f object TGs), dxbc-tess %.0f, dispatches %.0f\n",
++                          InterlockedExchange(&g_dc_plain, 0) / np, (double)InterlockedExchange64(&g_dc_plain_inst, 0) / np,
++                          InterlockedExchange(&g_dc_gs, 0) / np, InterlockedExchange(&g_dc_gs_ind, 0) / np, (double)InterlockedExchange64(&g_dc_gs_tg, 0) / np,
++                          InterlockedExchange(&g_dc_dtess, 0) / np, InterlockedExchange(&g_dc_dtess_ind, 0) / np, (double)InterlockedExchange64(&g_dc_dtess_tg, 0) / np,
++                          InterlockedExchange(&g_dc_tess, 0) / np, InterlockedExchange(&g_dc_disp, 0) / np);
++            }
+             d3d12_log("[perf] ml1116 encoders per frame: fence waits %.1f, fence updates %.1f, barriers %.1f (fence-chain %d)\n",
+                       g_perf_presents ? (double)(cw - lw) / g_perf_presents : 0.0, g_perf_presents ? (double)(cu - lu) / g_perf_presents : 0.0,
+                       g_perf_presents ? (double)(cb - lb) / g_perf_presents : 0.0, g_fence_chain);
+@@ -5148,7 +5588,7 @@ static void mad_queue_flush(struct mad_queue *q) {
+          * buffer opened -- so this batch ran with it non-resident. With the per-draw
+          * useResource lists gone (ml1060) nothing else covered that window. Commit
+          * whatever is staged right before the buffer that will use it. */
+-        if (sd->resset && InterlockedExchange(&sd->resset_dirty, 0)) MTLResidencySet_commit(sd->resset);
++        mad_resset_commit(sd);
+         EnterCriticalSection(&sd->fence_lock);
+         if (sd->gpu_event) {
+             serial = (UINT64)InterlockedIncrement64(&sd->gpu_serial);
+@@ -5535,6 +5975,7 @@ static ID3D12CommandAllocatorVtbl g_alloc_vtbl;
+ static ID3D12GraphicsCommandList7Vtbl g_list_vtbl;
+ static ID3D12FenceVtbl g_fence_vtbl;
+ 
++static int mad_trace_caps(void);
+ static HRESULT STDMETHODCALLTYPE device_QI(ID3D12Device *This, REFIID riid, void **out) {
+     HRESULT hr;
+     /* ml877: ID3D12Device1..8 are the same object with a longer vtable. UE 5.4
+@@ -5552,6 +5993,10 @@ static HRESULT STDMETHODCALLTYPE device_QI(ID3D12Device *This, REFIID riid, void
+         return S_OK;
+     }
+     hr = mad_qi((struct mad_obj *)This, riid, out, 0);
++    if (mad_trace_caps() && riid)
++        d3d12_log("[d3d12-caps] device QueryInterface {%08lx-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x} -> 0x%08lx\n",
++                  (unsigned long)riid->Data1, riid->Data2, riid->Data3, riid->Data4[0], riid->Data4[1],
++                  riid->Data4[2], riid->Data4[3], riid->Data4[4], riid->Data4[5], riid->Data4[6], riid->Data4[7], (unsigned long)hr);
+     if (hr == E_NOINTERFACE && riid) {
+         /* Name the interface the engine wanted, once each: ID3D12Device1..N,
+          * ID3D12InfoQueue and friends are how a title discovers optional
+@@ -5610,8 +6055,24 @@ static BOOL mad_tile_based_answer(void) {
+     return v ? TRUE : FALSE;
+ }
+ 
++static int mad_trace_caps(void) {   /* MADEIRA_D3D12_TRACE_CAPS=1: log every CheckFeatureSupport query and device QueryInterface */
++    static int on = -1;
++    if (on < 0) { char v[4] = {0}; on = (GetEnvironmentVariableA("MADEIRA_D3D12_TRACE_CAPS", v, sizeof v) == 1 && v[0] == '1') ? 1 : 0; }
++    return on;
++}
++static HRESULT device_CheckFeatureSupport_inner(ID3D12Device *This, D3D12_FEATURE feature, void *data, UINT size);
+ static HRESULT STDMETHODCALLTYPE device_CheckFeatureSupport(ID3D12Device *This,
+         D3D12_FEATURE feature, void *data, UINT size) {
++    HRESULT hr = device_CheckFeatureSupport_inner(This, feature, data, size);
++    if (mad_trace_caps()) {
++        const UINT *w = data; UINT n = data ? size / 4 : 0, i; char buf[200]; int o = 0;
++        for (i = 0; i < n && i < 8 && o < (int)sizeof buf - 12; i++) o += snprintf(buf + o, sizeof buf - o, " %08x", w[i]);
++        d3d12_log("[d3d12-caps] CheckFeatureSupport(feature %u, %u bytes) -> 0x%08lx; data:%s\n", (unsigned)feature, size, (unsigned long)hr, buf);
++    }
++    return hr;
++}
++static HRESULT device_CheckFeatureSupport_inner(ID3D12Device *This,
++        D3D12_FEATURE feature, void *data, UINT size) {
+     (void)This;
+     if (!data) return E_INVALIDARG;
+     switch (feature) {
+@@ -6438,6 +6899,7 @@ static UINT64 mad_texture_view_id(struct mad_device *d, struct mad_resource *r,
+     if (!r->texture) return 0;
+     if (!swz) swz = MAD_SWZ_IDENTITY;
+     if (!pf || (r->is_depth && pf != WMTPixelFormatX32_Stencil8)) pf = r->tex_pf;   /* depth textures keep their format: sampled as depth; ml1101: unless a stencil view */
++    if (lvl0 >= r->tex_mips) lvl0 = r->tex_mips ? r->tex_mips - 1 : 0;   /* a level past the clamped chain (mad_texinfo_from_desc) is the last 1x1 level */
+     if (nlvl == 0 || nlvl == ~0u || lvl0 + nlvl > r->tex_mips) nlvl = r->tex_mips > lvl0 ? r->tex_mips - lvl0 : 1;
+     if (nsl == 0 || nsl == ~0u || sl0 + nsl > r->tex_layers) nsl = r->tex_layers > sl0 ? r->tex_layers - sl0 : 1;
+     if (want == r->tex_type && lvl0 == 0 && nlvl == r->tex_mips && sl0 == 0 && nsl == r->tex_layers && pf == r->tex_pf && swz == MAD_SWZ_IDENTITY)
+@@ -7395,6 +7857,24 @@ static int mad_texinfo_from_desc(const D3D12_RESOURCE_DESC *desc, struct WMTText
+     ti->depth = 1;
+     ti->array_length = 1;
+     ti->mipmap_level_count = desc->MipLevels ? desc->MipLevels : 1;
++    /* Metal asserts on more mip levels than the largest dimension allows
++     * ("requests 12 mipmap levels, but the dimensions (832, 512, 1) can only
++     * support a maximum of 10"), which took Pioneers of Pagonia down; the same
++     * engine then quit on E_INVALIDARG ("GPU Error 80070057"). Clamp to the
++     * full chain and say so; views beyond the clamp would be the next symptom. */
++    {
++        UINT64 big = desc->Width > desc->Height ? desc->Width : desc->Height;
++        UINT maxmips = 1;
++        if (desc->Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D && layers > big) big = layers;
++        while (big > 1) { big >>= 1; maxmips++; }
++        if (ti->mipmap_level_count > maxmips) {
++            static unsigned said;
++            if (said++ < 8)
++                d3d12_log("[madeira-d3d12] texture %llux%ux%u fmt %u asks for %u mip levels, %u possible: clamped\n",
++                          (unsigned long long)desc->Width, desc->Height, layers, (unsigned)desc->Format, ti->mipmap_level_count, maxmips);
++            ti->mipmap_level_count = maxmips;
++        }
++    }
+     /* ml1030: same clamp as the PSO, or a 4x pipeline meets an 8x target. */
+     ti->sample_count = mad_clamp_sample_count(desc->SampleDesc.Count ? desc->SampleDesc.Count : 1);
+     /* ml932: every 1D/2D texture is allocated as an ARRAY (length >= 1),
+@@ -9600,7 +10080,6 @@ static int mad_tess_build(struct mad_device *d, struct mad_rootsig *rs, struct m
+     static unsigned said;
+     if (!t || !L || !air || !air2) { free(t); free(L); free(air); free(air2); return 0; }
+     mad_build_input_layout(desc, p, L);
+-
+     {   /* the mesh (domain) function: shared by every object variant */
+         struct mad_convert_opts o; memset(&o, 0, sizeof o);
+         o.tess_stage = 2; o.hs_bc = desc->HS.pShaderBytecode; o.hs_bc_len = desc->HS.BytecodeLength;
+@@ -9876,12 +10355,24 @@ static void mad_dtess_convert(struct mad_device *d, struct mad_rootsig *rs, stru
+         p->gs_emu = 2;
+         p->dt.out_prim = r.hs_out_prim; p->dt.patches_per_tg = r.hs_patches_per_tg; p->dt.threads_per_patch = r.hs_threads_per_patch;
+         p->dt.input_cps = r.hs_input_cps; p->dt.mesh_prims = r.ds_prims_per_mesh_tg; p->dt.max_factor = r.hs_max_factor;
++        {   /* ml1152 diagnostic: madeira.cfg dtess-max-factor = N clamps the hull's maximum factor;
++             * dtess-vertex-size = N overrides the converter's reported vertex output size (the hull
++             * strides the object stage's vertex store by it, so it must equal sizeof the VS output
++             * struct: the terrain VS stores 80 B records while reflection says 128). */
++            static long long mf = -2, vs = -2, df = -2;
++            if (mf == -2) { mf = mad_cfg_int_pe("dtess-max-factor", 0); vs = mad_cfg_int_pe("dtess-vertex-size", 0);
++                            df = mad_cfg_int_pe("dtess-depth-max-factor", 0);   /* ml1163: clamp for pipelines WITHOUT colour targets (shadow maps) */
++                            d3d12_log("[madeira-d3d12] ml1163 dtess-max-factor = %lld, dtess-depth-max-factor = %lld\n", mf, df); }
++            if (mf >= 1 && mf <= 64 && (float)mf < p->dt.max_factor) p->dt.max_factor = (float)mf;
++            if (df >= 1 && df <= 64 && desc->NumRenderTargets == 0 && (float)df < p->dt.max_factor) p->dt.max_factor = (float)df;   /* ml1163 */
++            if (vs >= 16 && vs <= 4096) p->gs_vertex_size = (UINT)vs;
++        }
+         snprintf(p->gs_name, sizeof p->gs_name, "%s", r.hs_out_prim == 1 ? "irconverter_domain_shader_point_passthrough"
+                  : r.hs_out_prim == 2 ? "irconverter_domain_shader_line_passthrough" : "irconverter_domain_shader_triangle_passthrough");
+-        if (said_ok++ < 8)
+-            d3d12_log("[madeira-d3d12] DXIL tessellation: vs '%s', %u control points in, %u out (%u B), %u patches x %u threads per object "
++        if (said_ok++ < 64)   /* ml1152: every pipeline, with its pointer (the capture header prints pso=) */
++            d3d12_log("[madeira-d3d12] DXIL tessellation: pso=%p vs '%s', %u control points in, %u out (%u B), %u patches x %u threads per object "
+                       "threadgroup, %u primitives per mesh threadgroup, output primitive %u, max factor %.1f, vertex %u B, patch constants %u B\n",
+-                      p->vs_name, r.hs_input_cps, r.hs_output_cps, r.hs_output_cp_size, r.hs_patches_per_tg, r.hs_threads_per_patch,
++                      (void *)p, p->vs_name, r.hs_input_cps, r.hs_output_cps, r.hs_output_cp_size, r.hs_patches_per_tg, r.hs_threads_per_patch,
+                       r.ds_prims_per_mesh_tg, r.hs_out_prim, (double)r.hs_max_factor, p->gs_vertex_size, r.hs_patch_const_size);
+     } else {
+         if (said_fail++ < 8)
+@@ -9930,6 +10421,19 @@ static HRESULT STDMETHODCALLTYPE device_CreateGraphicsPipelineState(ID3D12Device
+     if (!p) return E_OUTOFMEMORY;
+     p->vtbl = &g_pso_vtbl; p->refs = 1; p->iid = &IID_ID3D12PipelineState; p->name = "PipelineState";
+     if (desc->HS.pShaderBytecode || desc->DS.pShaderBytecode) { p->has_tess = 1; InterlockedIncrement(&g_tess_psos); }   /* ml1050 */
++    {   /* ml1151: MADEIRA_D3D12_CS_DUMP=1 also keeps every tessellation pipeline's four
++         * stages in C:\madeira-cs (tess_<pso>_<stage>.dxil); the capture header names the pso. */
++        static int dump_on = -1; static unsigned ndump;
++        if (dump_on < 0) { char v[4] = {0}; DWORD n = GetEnvironmentVariableA("MADEIRA_D3D12_CS_DUMP", v, sizeof v); dump_on = n == 1 && v[0] == '1'; }
++        if (dump_on && p->has_tess && ndump++ < 200) {
++            char fn[96];
++            snprintf(fn, sizeof fn, "tess_%p_vs.dxil", (void *)p); mad_dump_blob(fn, desc->VS.pShaderBytecode, desc->VS.BytecodeLength);
++            snprintf(fn, sizeof fn, "tess_%p_hs.dxil", (void *)p); mad_dump_blob(fn, desc->HS.pShaderBytecode, desc->HS.BytecodeLength);
++            snprintf(fn, sizeof fn, "tess_%p_ds.dxil", (void *)p); mad_dump_blob(fn, desc->DS.pShaderBytecode, desc->DS.BytecodeLength);
++            snprintf(fn, sizeof fn, "tess_%p_ps.dxil", (void *)p); mad_dump_blob(fn, desc->PS.pShaderBytecode, desc->PS.BytecodeLength);
++        }
++    }
++
+ 
+     {
+         struct madeira_ir_loc locs[MAD_LOC_MAX]; unsigned nl = 0;
+@@ -9944,10 +10448,27 @@ static HRESULT STDMETHODCALLTYPE device_CreateGraphicsPipelineState(ID3D12Device
+             char gsname[64];
+             if (!L) { pso_Release((ID3D12PipelineState *)p); return E_OUTOFMEMORY; }
+             mad_build_input_layout(desc, p, L);
+-            memset(&ov, 0, sizeof ov); ov.gs_emulation = 1; ov.topology = (UINT)desc->PrimitiveTopologyType; ov.layout = L->n ? L : NULL;
++            /* Always hand the converter a layout, empty or not, exactly as the DXIL
++             * tessellation path does: without one the stage-in function is emitted
++             * into the vertex library and the object function only exists under its
++             * mangled name (vs_main.dxil_irconverter_object_shader), so the lookup
++             * of 'vs_main' failed for every geometry-shader pipeline of Pioneers of
++             * Pagonia (SV_VertexID-driven vertex shaders, no input elements). */
++            memset(&ov, 0, sizeof ov); ov.gs_emulation = 1; ov.topology = (UINT)desc->PrimitiveTopologyType; ov.layout = L;
+             ov.lib2_out = &p->si_lib; ov.vs_output_size = &p->gs_vertex_size; ov.name_out = p->vs_name; ov.name_cap = sizeof p->vs_name;
+-            p->vs_fn = mad_convert_stage_opts(d, rs, desc->VS.pShaderBytecode, desc->VS.BytecodeLength, NULL, &p->vs_lib, "VS(gs)",
+-                                              vsin, 32, &nvsin, NULL, locs, &nl, &ov);
++            /* lib_only, as the DXIL tessellation path: with a separate stage-in
++             * function the converter emits the object stage only under its mangled
++             * name (vs_main.dxil_irconverter_object_shader) and the IR runtime in
++             * winemetal links the two when the pipeline is built, so a function
++             * lookup by the reflected name here fails ("converted library has no
++             * function 'vs_main'": every geometry-shader pipeline of Pioneers of
++             * Pagonia). The library is the result; vs_fn holds it, retained. */
++            ov.lib_only = 1;
++            {
++                obj_handle_t vl = mad_convert_stage_opts(d, rs, desc->VS.pShaderBytecode, desc->VS.BytecodeLength, NULL, &p->vs_lib, "VS(gs)",
++                                                         vsin, 32, &nvsin, NULL, locs, &nl, &ov);
++                if (vl) { NSObject_retain(vl); p->vs_fn = vl; }   /* vs_fn and vs_lib are released separately */
++            }
+             if (p->vs_fn) mad_apply_reflected_layout(p, rs, locs, nl, "VS");
+             memset(&og, 0, sizeof og); og.gs_emulation = 1; og.topology = (UINT)desc->PrimitiveTopologyType; og.gs_max_prims = &p->gs_max_prims;
+             og.name_out = gsname; og.name_cap = sizeof gsname; gsname[0] = 0;
+@@ -9958,8 +10479,8 @@ static HRESULT STDMETHODCALLTYPE device_CreateGraphicsPipelineState(ID3D12Device
+                 if (gfn) { mad_apply_reflected_layout(p, rs, locs, nl, "GS"); NSObject_release(gfn); }
+                 else gsname[0] = 0;
+             }
+-            { UINT ln = L->n; free(L); L = NULL;
+-            if (p->vs_fn && gsname[0] && (!ln || p->si_lib) && p->gs_max_prims) {
++            { free(L); L = NULL;
++            if (p->vs_fn && gsname[0] && p->si_lib && p->gs_max_prims) {
+                 p->gs_emu = 1;
+                 snprintf(p->gs_name, sizeof p->gs_name, "%s", gsname);
+             } else {
+@@ -11106,6 +11627,16 @@ static void STDMETHODCALLTYPE list_CopyTextureRegion(ID3D12GraphicsCommandList *
+             c->u.bt.w = box->right - box->left; c->u.bt.h = box->bottom - box->top; c->u.bt.d = box->back - box->front;
+         }
+         c->u.bt.x = x; c->u.bt.y = y; c->u.bt.z = z;
++        {   /* MADEIRA_D3D12_TRACE_COPIES=1: uploads into block-compressed or array textures, the streamed kind */
++            static int on = -1; static unsigned said;
++            if (on < 0) { char v[4] = {0}; on = (GetEnvironmentVariableA("MADEIRA_D3D12_TRACE_COPIES", v, sizeof v) == 1 && v[0] == '1') ? 1 : 0; }
++            if (on && (d->tex_layers > 1 || d->desc.Format == DXGI_FORMAT_BC7_UNORM || d->width >= 2048 || d->height >= 2048
++                       || ((d->desc.Format == DXGI_FORMAT_BC1_UNORM || d->desc.Format == DXGI_FORMAT_BC1_UNORM_SRGB) && d->width >= 256 && d->tex_mips <= 1)) && said++ < 2000)
++                d3d12_log("[copy-trace] b2t %s %ux%u L%u M%u fmt%u <- sub %u (level %u slice %u) %ux%ux%u at %u,%u,%u row %u rows %u off %llu src %llu B heap %u\n",
++                          d->name ? d->name : "?", d->width, d->height, d->tex_layers, d->tex_mips, (unsigned)d->desc.Format, dst->SubresourceIndex,
++                          c->u.bt.level, c->u.bt.slice, c->u.bt.w, c->u.bt.h, c->u.bt.d, x, y, z, c->u.bt.row, c->u.bt.rows,
++                          (unsigned long long)c->u.bt.off, (unsigned long long)s->size, (unsigned)s->heap);
++        }
+         return;
+     }
+     if (s->texture && !d->texture) {           /* readback: texture -> buffer */
+@@ -11141,6 +11672,15 @@ static void STDMETHODCALLTYPE list_CopyTextureRegion(ID3D12GraphicsCommandList *
+         c->u.tt.w = w; c->u.tt.h = h; c->u.tt.d = dd;
+         if (box) { c->u.tt.sx = box->left; c->u.tt.sy = box->top; c->u.tt.sz = box->front;
+                    c->u.tt.w = box->right - box->left; c->u.tt.h = box->bottom - box->top; c->u.tt.d = box->back - box->front; }
++        {   /* MADEIRA_D3D12_TRACE_COPIES=1: texture copies that change the format (ml1153) */
++            static int on = -1; static unsigned said;
++            if (on < 0) { char v[4] = {0}; on = (GetEnvironmentVariableA("MADEIRA_D3D12_TRACE_COPIES", v, sizeof v) == 1 && v[0] == '1') ? 1 : 0; }
++            if (on && s->desc.Format != d->desc.Format && said++ < 400)
++                d3d12_log("[copy-trace] t2t %s %ux%u fmt%u pf%u sub %u <- %s %ux%u fmt%u pf%u sub %u: %ux%ux%u from %u,%u,%u to %u,%u,%u\n",
++                          d->name ? d->name : "?", d->width, d->height, (unsigned)d->desc.Format, (unsigned)d->tex_pf, dst->SubresourceIndex,
++                          s->name ? s->name : "?", s->width, s->height, (unsigned)s->desc.Format, (unsigned)s->tex_pf, src->SubresourceIndex,
++                          c->u.tt.w, c->u.tt.h, c->u.tt.d, c->u.tt.sx, c->u.tt.sy, c->u.tt.sz, x, y, z);
++        }
+         return;
+     }
+     list_CopyBufferRegion(This, dst->pResource, 0, src->pResource, 0, s->size < d->size ? s->size : d->size);
+@@ -11548,6 +12088,17 @@ static HRESULT STDMETHODCALLTYPE device_SetResidencyPriority(ID3D12Device10 *Thi
+     (void)This; (void)n; (void)objs; (void)prio;
+     return S_OK;                     /* unified memory: everything is resident */
+ }
++/* Pioneers of Pagonia evicts and re-makes resident its streaming pools and
++ * treats any failure as a GPU error ("GPU Error 80004001: Not implemented",
++ * then exit). Same answer as SetResidencyPriority: unified memory, resident. */
++static HRESULT STDMETHODCALLTYPE device_MakeResident(ID3D12Device10 *This, UINT n, ID3D12Pageable *const *objs) {
++    (void)This; (void)n; (void)objs;
++    return S_OK;
++}
++static HRESULT STDMETHODCALLTYPE device_Evict(ID3D12Device10 *This, UINT n, ID3D12Pageable *const *objs) {
++    (void)This; (void)n; (void)objs;
++    return S_OK;
++}
+ static HRESULT STDMETHODCALLTYPE device_EnqueueMakeResident(ID3D12Device10 *This, D3D12_RESIDENCY_FLAGS flags,
+         UINT n, ID3D12Pageable *const *objs, ID3D12Fence *fence, UINT64 value) {
+     (void)This; (void)flags; (void)n; (void)objs;
+@@ -11819,6 +12370,8 @@ static void build_vtables(void) {
+     g_device_vtbl.GetResourceAllocationInfo2         = device_GetResourceAllocationInfo2;
+     g_device_vtbl.GetCopyableFootprints1             = device_GetCopyableFootprints1;
+     g_device_vtbl.CreateCommandQueue1                = device_CreateCommandQueue1;
++    g_device_vtbl.MakeResident                       = device_MakeResident;
++    g_device_vtbl.Evict                              = device_Evict;
+     g_device_vtbl.SetResidencyPriority               = device_SetResidencyPriority;
+     g_device_vtbl.EnqueueMakeResident                = device_EnqueueMakeResident;
+     g_device_vtbl.RemoveDevice                       = device_RemoveDevice;
+@@ -12106,6 +12659,25 @@ __declspec(dllexport) HRESULT WINAPI MadeiraD3D12CreateDevice(IUnknown *adapter,
+             mad_resident(d, d->null_buffer);
+         }
+     }
++#ifdef MADEIRA_HAVE_TESS_TABLES
++    if (d->mtl_device) {   /* ml1152 */
++        struct WMTBufferInfo tbi;
++        memset(&tbi, 0, sizeof tbi);
++        tbi.length = mad_tess_tables_len;
++        tbi.options = WMTResourceStorageModeShared;
++        d->tess_tables = MTLDevice_newBuffer(d->mtl_device, &tbi);
++        if (d->tess_tables && tbi.memory.ptr) {
++            memcpy(tbi.memory.ptr, mad_tess_tables, mad_tess_tables_len);
++            mad_resident(d, d->tess_tables);
++            d3d12_log("[madeira-d3d12] ml1152 tessellator tables: %u bytes at object/mesh buffer 7\n", mad_tess_tables_len);
++        } else {
++            if (d->tess_tables) { NSObject_release(d->tess_tables); d->tess_tables = 0; }
++            d3d12_log("[madeira-d3d12] ml1152 tessellator tables buffer creation failed; DXIL tessellation will misbehave\n");
++        }
++    }
++#else
++    d3d12_log("[madeira-d3d12] ml1152 built without the tessellator tables; DXIL tessellation will misbehave\n");
++#endif
+     if (d->mtl_device) {
+         /* One depth state for the cube: closer fragments win and write. */
+         struct WMTDepthStencilInfo dsi;
+diff --git a/madeira-d3d12/src/unix/madeira_ir_unix.mm b/madeira-d3d12/src/unix/madeira_ir_unix.mm
+index c535641..ded1d58 100644
+--- a/madeira-d3d12/src/unix/madeira_ir_unix.mm
++++ b/madeira-d3d12/src/unix/madeira_ir_unix.mm
+@@ -16,6 +16,7 @@
+  * dereference; what must follow the rendering backend is the TARGET, and that
+  * arrives in the arguments rather than being read from the local device. */
+ #include <dlfcn.h>
++#include <TargetConditionals.h>
+ #include <mach-o/loader.h>   /* ml1990: LC_UUID of the converter dylib */
+ #include "../../../build/madeira_cfg.h"   /* ml1095: one config file */
+ #include <sys/stat.h>
+@@ -105,6 +106,27 @@ static void ir_load_once(void) {
+     memset(&g_ir, 0, sizeof g_ir);
+     g_ir.status = MADEIRA_IR_NO_DYLIB;
+ 
++#if !TARGET_OS_IOS
++    /* macOS Wine (madeira-d3d12 x86_64 port): winemetal.so is a plain unix
++     * library under lib/wine/x86_64-unix, not an app bundle, so the converter
++     * is looked for next to this image first. Still not guest-controlled: the
++     * path is derived from where the loader put this very library. */
++    {
++        Dl_info self;
++        if (dladdr((const void *)&ir_load_once, &self) && self.dli_fname) {
++            char p[4096];
++            const char *slash = strrchr(self.dli_fname, '/');
++            size_t dirlen = slash ? (size_t)(slash - self.dli_fname) : 0;
++            if (dirlen && dirlen + 32 < sizeof p) {
++                memcpy(p, self.dli_fname, dirlen);
++                snprintf(p + dirlen, sizeof p - dirlen, "/libmetalirconverter.dylib");
++                g_ir.handle = dlopen(p, RTLD_NOW | RTLD_LOCAL);
++            }
++        }
++    }
++    if (g_ir.handle) goto bind;
++#define MADEIRA_IR_BIND_LABEL 1
++#endif
+ #ifdef MADEIRA_IR_HOST_TEST
+     /* Host-only: lets the offline round-trip test point at the converter in the
+      * extracted package. Compiled out of the device build entirely, so the
+@@ -131,7 +153,7 @@ static void ir_load_once(void) {
+         }
+     }
+ 
+-#ifdef MADEIRA_IR_HOST_TEST
++#if defined(MADEIRA_IR_HOST_TEST) || defined(MADEIRA_IR_BIND_LABEL)
+ bind:
+ #endif
+ #define IR_BIND(n) \
+@@ -1729,6 +1751,22 @@ static uint32_t mad_ir_compat_flags(void) {
+     if (!lib_bytes) { status = MADEIRA_IR_NO_MEMORY; goto done; }
+     need = g_ir.IRMetalLibGetBytecode(lib, lib_bytes);
+     if (!need) { status = MADEIRA_IR_NO_METALLIB; goto done; }
++    /* MADEIRA_IR_DUMP_LIBS=1: every converted metallib to <MADEIRA_DOCS_DIR>/madeira-libs/,
++     * so the function names the converter chose can be read offline (strings, metal-objdump). */
++    {
++        static int dump = -1, seq;
++        if (dump < 0) { const char *e = getenv("MADEIRA_IR_DUMP_LIBS"); dump = (e && e[0] == '1') ? 1 : 0; }
++        if (dump) {
++            const char *docs = getenv("MADEIRA_DOCS_DIR");
++            char dir[512], path[640];
++            snprintf(dir, sizeof dir, "%s/madeira-libs", docs && docs[0] ? docs : "/tmp");
++            mkdir(dir, 0755);
++            snprintf(path, sizeof path, "%s/%03d_stage%u_gs%u_%s.metallib", dir, seq++, (unsigned)stage, a->gs_emulation ? 1u : 0u,
++                     (entry && entry[0]) ? entry : "noentry");
++            FILE *f = fopen(path, "wb");
++            if (f) { fwrite(lib_bytes, 1, need, f); fclose(f); }
++        }
++    }
+ 
+     /* The converter RENAMES entry points, so the name to give Metal comes from
+      * reflection rather than from what D3D called it.
+diff --git a/madeira-d3d12/tests/windows/cube_window.c b/madeira-d3d12/tests/windows/cube_window.c
+index a982060..e8f590c 100644
+--- a/madeira-d3d12/tests/windows/cube_window.c
++++ b/madeira-d3d12/tests/windows/cube_window.c
+@@ -93,12 +93,14 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
+     if (!rootsig) { printf("cube: no root signature\n"); return 1; }
+ 
+     D3D12_GRAPHICS_PIPELINE_STATE_DESC pd; ZeroMemory(&pd, sizeof pd);
++    pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;   /* D3D12 writes nothing with a zero mask (macOS port, 2026-10-12) */
+     pd.pRootSignature = rootsig;
+     pd.VS.pShaderBytecode = texcube_vs_dxil; pd.VS.BytecodeLength = sizeof texcube_vs_dxil;
+     pd.PS.pShaderBytecode = texcube_ps_dxil; pd.PS.BytecodeLength = sizeof texcube_ps_dxil;
+     pd.NumRenderTargets = 1;
+     pd.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+     pd.DSVFormat = DXGI_FORMAT_D32_FLOAT;
++    pd.DepthStencilState.DepthEnable = TRUE; pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL; pd.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;   /* macOS port, 2026-10-12 */
+     pd.SampleDesc.Count = 1;
+     pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+     ID3D12PipelineState *pso = NULL;
+@@ -185,6 +187,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
+     smph->lpVtbl->GetGPUDescriptorHandleForHeapStart(smph, &smp_gpu);
+ 
+     D3D12_SHADER_RESOURCE_VIEW_DESC svd; ZeroMemory(&svd, sizeof svd);
++    svd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;   /* mapping 0 means "component 0 everywhere" in D3D12 (macOS port, 2026-10-12) */
+     svd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+     svd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+     svd.Texture2D.MipLevels = 1;
+diff --git a/madeira-d3d12/tests/windows/m2_abi.c b/madeira-d3d12/tests/windows/m2_abi.c
+index f2ad3bd..2a72dac 100644
+--- a/madeira-d3d12/tests/windows/m2_abi.c
++++ b/madeira-d3d12/tests/windows/m2_abi.c
+@@ -238,6 +238,9 @@ int main(void) {
+         if (FAILED(ID3D12GraphicsCommandList_Close(list))) { cycles_ok = 0; break; }
+         ID3D12CommandQueue_ExecuteCommandLists(queue, 1, lists);
+         if (FAILED(ID3D12CommandQueue_Signal(queue, fence, n))) { cycles_ok = 0; break; }
++        /* Queue signals are asynchronous in D3D12 (and since ml1061 in this
++         * runtime); wait for the value before reading it back. */
++        if (FAILED(ID3D12Fence_SetEventOnCompletion(fence, n, NULL))) { cycles_ok = 0; break; }
+         if (ID3D12Fence_GetCompletedValue(fence) != n) { cycles_ok = 0; break; }
+     }
+     CHECK(cycles_ok && ID3D12Fence_GetCompletedValue(fence) == 46,
+@@ -374,6 +377,7 @@ int main(void) {
+         CHECK(SUCCEEDED(hr) && rs, "root signature created (%#lx)", hr);
+ 
+         D3D12_GRAPHICS_PIPELINE_STATE_DESC pd; ZeroMemory(&pd, sizeof pd);
++        pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;   /* D3D12 writes nothing with a zero mask; the runtime maps it faithfully (macOS port, 2026-10-12) */
+         pd.pRootSignature = rs;
+         pd.VS.pShaderBytecode = tri_vs_dxil; pd.VS.BytecodeLength = sizeof tri_vs_dxil;
+         pd.PS.pShaderBytecode = tri_ps_dxil; pd.PS.BytecodeLength = sizeof tri_ps_dxil;
+@@ -526,12 +530,15 @@ int main(void) {
+         CHECK(crs != NULL, "cube root signature created from a serialized blob");
+ 
+         D3D12_GRAPHICS_PIPELINE_STATE_DESC cpd; ZeroMemory(&cpd, sizeof cpd);
++        cpd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;   /* D3D12 writes nothing with a zero mask; the runtime maps it faithfully (macOS port, 2026-10-12) */
+         cpd.pRootSignature = crs;
+         cpd.VS.pShaderBytecode = cube_vs_dxil; cpd.VS.BytecodeLength = sizeof cube_vs_dxil;
+         cpd.PS.pShaderBytecode = cube_ps_dxil; cpd.PS.BytecodeLength = sizeof cube_ps_dxil;
+         cpd.NumRenderTargets = 1;
+         cpd.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+         cpd.DSVFormat = DXGI_FORMAT_D32_FLOAT;
++        cpd.DepthStencilState.DepthEnable = TRUE; cpd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
++        cpd.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;   /* a zeroed state is "no depth test" in D3D12 (macOS port, 2026-10-12) */
+         cpd.SampleDesc.Count = 1;
+         cpd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+         ID3D12PipelineState *cpso = NULL;
+@@ -718,6 +725,7 @@ int main(void) {
+         CHECK(trs != NULL, "textured root signature (CBV + SRV table + sampler table) created");
+ 
+         D3D12_GRAPHICS_PIPELINE_STATE_DESC tpd; ZeroMemory(&tpd, sizeof tpd);
++        tpd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;   /* D3D12 writes nothing with a zero mask; the runtime maps it faithfully (macOS port, 2026-10-12) */
+         tpd.pRootSignature = trs;
+         tpd.VS.pShaderBytecode = tex_vs_dxil; tpd.VS.BytecodeLength = sizeof tex_vs_dxil;
+         tpd.PS.pShaderBytecode = tex_ps_dxil; tpd.PS.BytecodeLength = sizeof tex_ps_dxil;
+@@ -738,7 +746,8 @@ int main(void) {
+         ID3D12Resource *srctex = NULL, *trt = NULL, *tpix = NULL, *tup = NULL, *tcb = NULL;
+         ID3D12Device_CreateCommittedResource(dev, &thp, D3D12_HEAP_FLAG_NONE, &ttd,
+                 D3D12_RESOURCE_STATE_COMMON, NULL, &IID_ID3D12Resource, (void **)&srctex);
+-        ID3D12Device_CreateCommittedResource(dev, &thp, D3D12_HEAP_FLAG_NONE, &ttd,
++        D3D12_RESOURCE_DESC ttd_rt = ttd; ttd_rt.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;   /* Metal needs RenderTarget usage; the macOS debug layer refuses the pass without it */
++        ID3D12Device_CreateCommittedResource(dev, &thp, D3D12_HEAP_FLAG_NONE, &ttd_rt,
+                 D3D12_RESOURCE_STATE_COMMON, NULL, &IID_ID3D12Resource, (void **)&trt);
+         CHECK(srctex && trt, "sampled texture and render target created");
+ 
+@@ -809,6 +818,7 @@ int main(void) {
+             mh.ptr += (SIZE_T)SMP_SLOT * inc;  mg.ptr += (UINT64)SMP_SLOT * inc;
+ 
+             D3D12_SHADER_RESOURCE_VIEW_DESC svd; ZeroMemory(&svd, sizeof svd);
++            svd.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;   /* mapping 0 means "component 0 everywhere" in D3D12 (macOS port, 2026-10-12) */
+             svd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+             svd.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+             svd.Texture2D.MipLevels = 1;
