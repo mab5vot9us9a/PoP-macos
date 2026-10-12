@@ -22,6 +22,7 @@ phase2/.scratch
 
 # Screenshots are not published
 *.png
+!screenshot.png
 
 # macOS / editor noise
 .DS_Store
