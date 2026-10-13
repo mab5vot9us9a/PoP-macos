@@ -178,6 +178,10 @@ WINEDLLOVERRIDES="dxgi,d3d12,d3d12core=n,b;GfnRuntimeSdk=d" ./run_game.sh game
 ./run_game.sh kill
 ```
 
+`./run_game.sh play` is the same launch with the `GfnRuntimeSdk` override baked in and `play.cfg` layered
+over `madeira.cfg` through `MADEIRA_CFG_GAME` (`perf-log = 0`: no GPU timestamp readback, draw census or
+`[perf]` block), for playing rather than measuring. It logs to `logs/play.log`.
+
 Before launching: quit any other Steam client of the same account (the Part A wrapper's Steam
 logs this one out). The `GfnRuntimeSdk=d` override is required: the GeForce NOW SDK crashes on
 unload with Madeira's timing.

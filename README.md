@@ -19,6 +19,36 @@ Supporting material: `phase0/` (carving and conversion scripts, converter result
 (test runner), `phase2/` (launch script, `madeira.cfg`, tools, and `patches/` with the full diff
 against the Madeira and DXMT trees).
 
+## Launching the game (everything built and patched)
+
+With the wrapper copy at `~/Applications/Steambuild-Madeira.app`, the patched `d3d12.dll`,
+`d3d12core.dll` and DXMT's `dxgi.dll` in the game folder, and `madeira.cfg` next to the script
+(see [reproduce2.md](reproduce2.md)):
+
+```
+cd phase2
+WINEDLLOVERRIDES="dxgi,d3d12,d3d12core=n,b;GfnRuntimeSdk=d" ./run_game.sh game
+```
+
+This starts Steam inside the wrapper and launches the game (app 2155180). Stderr goes to
+`phase2/logs/run-<timestamp>.log`, which carries the runtime's `[perf]` block every 5 s.
+`GfnRuntimeSdk=d` is required, otherwise the game faults after the splash.
+
+To just play, without the perf instrumentation (no per-command-buffer GPU timestamps, no draw
+census, no `[perf]` block), use the `play` mode; it bakes the overrides in and applies
+`phase2/play.cfg` on top of `madeira.cfg` (`perf-log = 0`), logging to `phase2/logs/play.log`:
+
+```
+cd phase2
+./run_game.sh play
+```
+
+To stop everything:
+
+```
+./run_game.sh kill
+```
+
 Not included, see `.gitignore`: the game's shader blobs and any output derived from them,
 Apple's D3DMetal and Metal Shader Converter binaries, runtime logs, frame captures, and the
 screenshots the documents refer to by file name.
